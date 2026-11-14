@@ -1,0 +1,142 @@
+; ============================================================================
+; HvVirtualAudio.inf — WDK PortCls/WaveRT Virtual Audio Driver Installation File
+; Exposes:
+;   1. Playback Endpoint: "Hyper-V Console Speakers" (48 kHz, 16/24-bit Stereo)
+;   2. Capture Endpoint:  "Hyper-V Console Microphone" (48 kHz, 16-bit Stereo/Mono)
+; ============================================================================
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = MEDIA
+ClassGuid   = {4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = HvVirtualAudio.cat
+DriverVer   = 11/14/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13 ; DriverStore
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+HvVirtualAudio.sys = 1,,
+
+; ============================================================================
+; Manufacturer & Models Section (x64)
+; ============================================================================
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64.10.0...17763
+
+[Standard.NTamd64.10.0...17763]
+%HvVirtualAudio.DeviceDesc% = HvVirtualAudio_Device, Root\HvVirtualAudio
+
+; ============================================================================
+; Device Installation Section
+; ============================================================================
+
+[HvVirtualAudio_Device.NT]
+Include   = ks.inf, wdmaudio.inf
+Needs     = KS.Registration, WDMAUDIO.Registration
+CopyFiles = HvVirtualAudio_CopyFiles
+AddReg    = HvVirtualAudio_AddReg
+
+[HvVirtualAudio_CopyFiles]
+HvVirtualAudio.sys
+
+[HvVirtualAudio_AddReg]
+HKR,,AssociatedFilters,,"wdmaud,swmidi,redbook"
+HKR,,Driver,,HvVirtualAudio.sys
+HKR,Drivers,SubClasses,,"wave,mixer"
+HKR,Drivers\wave\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\mixer\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\wave\wdmaud.drv,Description,,%HvVirtualAudio.DeviceDesc%
+HKR,Drivers\mixer\wdmaud.drv,Description,,%HvVirtualAudio.DeviceDesc%
+
+; Register Endpoint Friendly Names in MediaCategories
+HKLM,%MediaCategories%\%SpeakerNameGuid%,Name,,%SpeakerFriendlyName%
+HKLM,%MediaCategories%\%SpeakerNameGuid%,Display,1,00,00,00,00
+HKLM,%MediaCategories%\%MicNameGuid%,Name,,%MicFriendlyName%
+HKLM,%MediaCategories%\%MicNameGuid%,Display,1,00,00,00,00
+
+; ============================================================================
+; Interfaces Section (Speaker & Microphone Subdevices)
+; ============================================================================
+
+[HvVirtualAudio_Device.NT.Interfaces]
+AddInterface = %KSCATEGORY_AUDIO%,    %KSNAME_WaveSpeaker%,        HvAudio.I.WaveSpeaker
+AddInterface = %KSCATEGORY_RENDER%,   %KSNAME_WaveSpeaker%,        HvAudio.I.WaveSpeaker
+AddInterface = %KSCATEGORY_REALTIME%, %KSNAME_WaveSpeaker%,        HvAudio.I.WaveSpeaker
+AddInterface = %KSCATEGORY_AUDIO%,    %KSNAME_TopologySpeaker%,    HvAudio.I.TopologySpeaker
+AddInterface = %KSCATEGORY_TOPOLOGY%, %KSNAME_TopologySpeaker%,    HvAudio.I.TopologySpeaker
+
+AddInterface = %KSCATEGORY_AUDIO%,    %KSNAME_WaveMicrophone%,     HvAudio.I.WaveMicrophone
+AddInterface = %KSCATEGORY_CAPTURE%,  %KSNAME_WaveMicrophone%,     HvAudio.I.WaveMicrophone
+AddInterface = %KSCATEGORY_REALTIME%, %KSNAME_WaveMicrophone%,     HvAudio.I.WaveMicrophone
+AddInterface = %KSCATEGORY_AUDIO%,    %KSNAME_TopologyMicrophone%, HvAudio.I.TopologyMicrophone
+AddInterface = %KSCATEGORY_TOPOLOGY%, %KSNAME_TopologyMicrophone%, HvAudio.I.TopologyMicrophone
+
+[HvAudio.I.WaveSpeaker]
+AddReg = HvAudio.I.WaveSpeaker.AddReg
+[HvAudio.I.WaveSpeaker.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%SpeakerFriendlyName%
+
+[HvAudio.I.TopologySpeaker]
+AddReg = HvAudio.I.TopologySpeaker.AddReg
+[HvAudio.I.TopologySpeaker.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%SpeakerFriendlyName%
+
+[HvAudio.I.WaveMicrophone]
+AddReg = HvAudio.I.WaveMicrophone.AddReg
+[HvAudio.I.WaveMicrophone.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%MicFriendlyName%
+
+[HvAudio.I.TopologyMicrophone]
+AddReg = HvAudio.I.TopologyMicrophone.AddReg
+[HvAudio.I.TopologyMicrophone.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%MicFriendlyName%
+
+; ============================================================================
+; Service Installation Section
+; ============================================================================
+
+[HvVirtualAudio_Device.NT.Services]
+AddService = HvVirtualAudio, 0x00000002, HvVirtualAudio_Service_Inst
+
+[HvVirtualAudio_Service_Inst]
+DisplayName   = %HvVirtualAudio.SvcDesc%
+ServiceType   = 1                  ; SERVICE_KERNEL_DRIVER
+StartType     = 3                  ; SERVICE_DEMAND_START
+ErrorControl  = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\HvVirtualAudio.sys
+
+[Strings]
+ManufacturerName          = "VMStream Project"
+DiskName                  = "VMStream Virtual Audio Driver Installation Disk"
+HvVirtualAudio.DeviceDesc = "Hyper-V Console Virtual Audio Device (WaveRT)"
+HvVirtualAudio.SvcDesc    = "Hyper-V Console WaveRT Virtual Audio Driver"
+
+SpeakerFriendlyName       = "Hyper-V Console Speakers"
+MicFriendlyName           = "Hyper-V Console Microphone"
+
+MediaCategories           = "SYSTEM\CurrentControlSet\Control\MediaCategories"
+SpeakerNameGuid           = "{8D2A4E61-1010-4B9E-8F21-5C7E9A1D0001}"
+MicNameGuid               = "{8D2A4E61-1010-4B9E-8F21-5C7E9A1D0002}"
+
+Proxy.CLSID               = "{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO          = "{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER         = "{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_CAPTURE        = "{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME       = "{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY       = "{DDA54A40-1E4C-11D1-A050-405705C10000}"
+
+KSNAME_WaveSpeaker        = "WaveSpeaker"
+KSNAME_TopologySpeaker    = "TopologySpeaker"
+KSNAME_WaveMicrophone     = "WaveMicrophone"
+KSNAME_TopologyMicrophone = "TopologyMicrophone"

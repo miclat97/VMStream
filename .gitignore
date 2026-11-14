@@ -1,0 +1,12 @@
+# Build & Visual Studio Artifacts
+build/
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+*.cat
+*.cer
+*.pfx

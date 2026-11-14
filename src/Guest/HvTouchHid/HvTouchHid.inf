@@ -1,0 +1,84 @@
+; ============================================================================
+; HvTouchHid.inf — WDK Installation File for VMStream Virtual Multi-Touch HID
+; Uses built-in mshidkmdf.sys as Function Driver and HvTouchHid.sys (VHF) as LowerFilter
+; ============================================================================
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %ManufacturerName%
+CatalogFile = HvTouchHid.cat
+DriverVer   = 11/14/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13 ; DriverStore
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+HvTouchHid.sys = 1,,
+
+; ============================================================================
+; Manufacturer & Models Section (x64)
+; ============================================================================
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64.10.0...17763
+
+[Standard.NTamd64.10.0...17763]
+%HvTouchHid.DeviceDesc% = HvTouchHid_Device, Root\HvTouchHid
+
+; ============================================================================
+; Device Installation Section
+; ============================================================================
+
+[HvTouchHid_Device.NT]
+CopyFiles = Drivers_Dir
+
+[Drivers_Dir]
+HvTouchHid.sys
+
+[HvTouchHid_Device.NT.HW]
+AddReg = HvTouchHid_Device.NT.AddReg
+
+[HvTouchHid_Device.NT.AddReg]
+; Register HvTouchHid.sys as a LowerFilter beneath the in-box mshidkmdf.sys function driver
+HKR,,"LowerFilters",0x00010000,"HvTouchHid"
+
+; ============================================================================
+; Service Installation Section
+; ============================================================================
+
+[HvTouchHid_Device.NT.Services]
+; mshidkmdf is the in-box Windows HID-KMDF pass-through function driver (SPSVCINST_ASSOCSERVICE = 0x00000002)
+AddService = mshidkmdf, 0x00000002, mshidkmdf_Service_Inst
+AddService = HvTouchHid,, HvTouchHid_Service_Inst
+
+[mshidkmdf_Service_Inst]
+ServiceType   = 1                  ; SERVICE_KERNEL_DRIVER
+StartType     = 3                  ; SERVICE_DEMAND_START
+ErrorControl  = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary = %12%\mshidkmdf.sys
+
+[HvTouchHid_Service_Inst]
+DisplayName   = %HvTouchHid.SvcDesc%
+ServiceType   = 1                  ; SERVICE_KERNEL_DRIVER
+StartType     = 3                  ; SERVICE_DEMAND_START
+ErrorControl  = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\HvTouchHid.sys
+
+[HvTouchHid_Device.NT.Wdf]
+KmdfService = HvTouchHid, HvTouchHid_wdfsect
+
+[HvTouchHid_wdfsect]
+KmdfLibraryVersion = 1.31
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "VMStream Project"
+DiskName               = "VMStream Multi-Touch Digitizer Installation Disk"
+HvTouchHid.DeviceDesc  = "Hyper-V Console Multi-Touch Digitizer (VHF)"
+HvTouchHid.SvcDesc     = "Hyper-V Console Multi-Touch VHF Filter Driver"

@@ -45,27 +45,29 @@ flowchart LR
 ```text
 VMStream/
 ├── VMStream.sln
+├── Setup-And-Build.cmd                  # One-click UAC-elevating prerequisite installer & full build launcher
 ├── README.md
 ├── scripts/
-│   ├── Register-HvSocketServices.ps1  # Host script: registers HVSocket GUIDs + SDDL in HKLM
-│   ├── Build-All.ps1                  # Compiles C# Host, C++20 Guest Bridge, and WDK Drivers
-│   └── Install-GuestDrivers.ps1       # Guest script: test cert, testsigning, SetupAPI/pnputil, service
+│   ├── Install-BuildPrerequisites.ps1   # Auto-installs .NET 8 SDK, VS 2022 C++ Build Tools, Win11 SDK & WDK
+│   ├── Register-HvSocketServices.ps1    # Host script: registers HVSocket GUIDs + SDDL in HKLM
+│   ├── Build-All.ps1                    # Bootstraps prerequisites & compiles C# Host, C++ Bridge, and WDK Drivers
+│   └── Install-GuestDrivers.ps1         # Guest script: test cert, testsigning, SetupAPI/pnputil, service
 └── src/
     ├── Shared/
-    │   └── HvProtocol.h               # Packed binary wire structs, Service GUIDs, and IOCTLs
+    │   └── HvProtocol.h                 # Packed binary wire structs, Service GUIDs, and IOCTLs
     ├── Host/
-    │   └── HvConsole.Host/            # .NET 8 C# WinForms x64 Host Application
-    │       ├── Audio/                 # WASAPI interop, 25ms AdaptiveJitterBuffer, HostAudioEngine
-    │       ├── Input/                 # IHWindowClass SetWindowSubclass touch capture & WH_KEYBOARD_LL
-    │       ├── Protocol/              # Packed C# wire structs matching HvProtocol.h
-    │       ├── Rdp/                   # Native mstscax.dll AxHost Console Session wrapper
-    │       ├── Transport/             # Native AF_HYPERV VM-isolated socket listener & TCP fallback
-    │       ├── UI/                    # VmPickerForm, ConsoleSessionForm, QuickSettingsHudForm, ToastOverlayForm
-    │       └── Wmi/                   # HyperVVmDiscovery (root\virtualization\v2 + GPU-PV detection)
+    │   └── HvConsole.Host/              # .NET 8 C# WinForms x64 Host Application
+    │       ├── Audio/                   # WASAPI interop, 25ms AdaptiveJitterBuffer, HostAudioEngine
+    │       ├── Input/                   # IHWindowClass SetWindowSubclass touch capture & WH_KEYBOARD_LL
+    │       ├── Protocol/                # Packed C# wire structs matching HvProtocol.h
+    │       ├── Rdp/                     # Native mstscax.dll AxHost Console Session wrapper
+    │       ├── Transport/               # Native AF_HYPERV VM-isolated socket listener & TCP fallback
+    │       ├── UI/                      # VmPickerForm, ConsoleSessionForm, QuickSettingsHudForm, ToastOverlayForm
+    │       └── Wmi/                     # HyperVVmDiscovery (root\virtualization\v2 + GPU-PV detection)
     └── Guest/
-        ├── HvGuestBridge/             # C++20 Windows Service connecting AF_HYPERV (HV_GUID_PARENT) to IOCTLs
-        ├── HvTouchHid/                # C++ KMDF + VHF Multi-Touch Digitizer Driver (.inf, .sys)
-        └── HvVirtualAudio/            # C++ PortCls/WaveRT Virtual Audio Driver (Speakers + Mic) (.inf, .sys)
+        ├── HvGuestBridge/               # C++20 Windows Service connecting AF_HYPERV (HV_GUID_PARENT) to IOCTLs
+        ├── HvTouchHid/                  # C++ KMDF + VHF Multi-Touch Digitizer Driver (.inf, .sys)
+        └── HvVirtualAudio/              # C++ PortCls/WaveRT Virtual Audio Driver (Speakers + Mic) (.inf, .sys)
 ```
 
 ---
@@ -92,24 +94,25 @@ VMStream/
 
 ---
 
-## 4. Build Prerequisites & Compilation
+## 4. Zero-Touch Prerequisite Installation & Build
 
-### Prerequisites
-- **Windows 10 / 11 x64** with Hyper-V enabled
-- **.NET 8.0 SDK (x64)**
-- **Visual Studio 2022** with:
-  - *Desktop development with C++* (MSVC v143 x64)
-  - *Windows 11 SDK (10.0.22621.0 or newer)*
-  - *Windows Driver Kit (WDK) for Windows 11*
+`VMStream` includes an automated toolchain bootstrapper (`scripts\Install-BuildPrerequisites.ps1`, called automatically by `scripts\Build-All.ps1` and `Setup-And-Build.cmd`). If any required compiler or SDK is missing on your machine, it automatically downloads and installs:
+1. **.NET 8.0 SDK (x64)** (via `winget` or official Microsoft `dotnet-install.ps1`)
+2. **Visual Studio 2022 Build Tools + MSVC v143 x64 C++20 Compiler + Spectre Libraries** (`vs_buildtools.exe`)
+3. **Windows 11 SDK (`10.0.22621.0+`)** (`winsdksetup.exe`)
+4. **Windows Driver Kit (WDK)** (`wdksetup.exe`) + automatic `WDK.vsix` MSBuild `WindowsKernelModeDriver10.0` extraction
 
 ### Building Everything
-From an elevated or Developer PowerShell prompt:
+Double-click **`Setup-And-Build.cmd`** in the repository root, or run from PowerShell:
 
 ```powershell
-# Full build (C# Host + C++20 Guest Service + WDK Kernel Drivers)
+# Full auto-bootstrap + build (C# Host + C++20 Guest Service + WDK Kernel Drivers)
 .\scripts\Build-All.ps1 -Configuration Release
 
-# Or build only the C# Host and C++20 Guest Service (skipping WDK drivers if WDK is not installed)
+# Or install/verify prerequisites standalone
+.\scripts\Install-BuildPrerequisites.ps1
+
+# Or build only the C# Host and C++20 Guest Service (skipping WDK drivers)
 .\scripts\Build-All.ps1 -Configuration Release -SkipWdkDrivers
 ```
 

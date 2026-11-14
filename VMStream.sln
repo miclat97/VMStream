@@ -13,6 +13,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Shared", "Shared", "{A11111
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "scripts", "scripts", "{A1111111-1111-4111-8111-111111111004}"
 	ProjectSection(SolutionItems) = preProject
+		Setup-And-Build.cmd = Setup-And-Build.cmd
+		scripts\Install-BuildPrerequisites.ps1 = scripts\Install-BuildPrerequisites.ps1
 		scripts\Register-HvSocketServices.ps1 = scripts\Register-HvSocketServices.ps1
 		scripts\Build-All.ps1 = scripts\Build-All.ps1
 		scripts\Install-GuestDrivers.ps1 = scripts\Install-GuestDrivers.ps1

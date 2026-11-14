@@ -1,6 +1,6 @@
 // ============================================================================
-// HvTransport.h — Transport Abstraction (AF_HYPERV Primary + TCP Fallback)
-// Project: VMStream — Guest Service Bridge (HvGuestBridge.exe)
+// HvTransport.h - Transport Abstraction (AF_HYPERV Primary + TCP Fallback)
+// Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
 #pragma once
 
@@ -37,7 +37,7 @@
 #include "../../Shared/HvProtocol.h"
 
 // ============================================================================
-// IHvTransport — Clean Transport Abstraction Interface
+// IHvTransport - Clean Transport Abstraction Interface
 // ============================================================================
 class IHvTransport {
 public:
@@ -60,7 +60,7 @@ public:
 };
 
 // ============================================================================
-// HvSocketTransport — Native Hyper-V Socket (AF_HYPERV / HV_PROTOCOL_RAW)
+// HvSocketTransport - Native Hyper-V Socket (AF_HYPERV / HV_PROTOCOL_RAW)
 // Connects from Guest VM to HV_GUID_PARENT with sub-millisecond VMBus latency
 // ============================================================================
 class HvSocketTransport final : public IHvTransport {

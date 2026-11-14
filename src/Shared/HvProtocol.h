@@ -1,6 +1,6 @@
 // ============================================================================
-// HvProtocol.h — Shared Wire Protocol, Service GUIDs, and IOCTL Definitions
-// Project: VMStream — Zero-Artifact Hyper-V Console Client & Guest Bridge
+// HvProtocol.h - Shared Wire Protocol, Service GUIDs, and IOCTL Definitions
+// Project: VMStream - Zero-Artifact Hyper-V Console Client & Guest Bridge
 // ============================================================================
 #pragma once
 

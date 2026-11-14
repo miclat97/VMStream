@@ -1,5 +1,5 @@
 // ============================================================================
-// TopologyMiniport.cpp — PortCls Topology Miniport Implementation
+// TopologyMiniport.cpp - PortCls Topology Miniport Implementation
 // Exposes "Hyper-V Console Speakers" (KSNODETYPE_SPEAKER) and
 // "Hyper-V Console Microphone" (KSNODETYPE_MICROPHONE) Core Audio Endpoints
 // ============================================================================
@@ -103,7 +103,7 @@ static PCNODE_DESCRIPTOR g_TopologyNodes[] = {
 
 // Render Topology Pins ("Hyper-V Console Speakers")
 static PCPIN_DESCRIPTOR g_RenderTopoPins[] = {
-    // KSPIN_TOPO_WAVEOUT_SOURCE (0) — Connected from WaveRT Render Bridge Pin
+    // KSPIN_TOPO_WAVEOUT_SOURCE (0) - Connected from WaveRT Render Bridge Pin
     {
         0, 0, 0,
         NULL,
@@ -118,7 +118,7 @@ static PCPIN_DESCRIPTOR g_RenderTopoPins[] = {
             0
         }
     },
-    // KSPIN_TOPO_LINEOUT_DEST (1) — Speaker Endpoint Pin
+    // KSPIN_TOPO_LINEOUT_DEST (1) - Speaker Endpoint Pin
     {
         0, 0, 0,
         &g_PinJackAutomation,
@@ -137,7 +137,7 @@ static PCPIN_DESCRIPTOR g_RenderTopoPins[] = {
 
 // Capture Topology Pins ("Hyper-V Console Microphone")
 static PCPIN_DESCRIPTOR g_CaptureTopoPins[] = {
-    // KSPIN_TOPO_MIC_SOURCE (0) — Microphone Endpoint Pin
+    // KSPIN_TOPO_MIC_SOURCE (0) - Microphone Endpoint Pin
     {
         0, 0, 0,
         &g_PinJackAutomation,
@@ -152,7 +152,7 @@ static PCPIN_DESCRIPTOR g_CaptureTopoPins[] = {
             0
         }
     },
-    // KSPIN_TOPO_WAVEIN_DEST (1) — Connected to WaveRT Capture Bridge Pin
+    // KSPIN_TOPO_WAVEIN_DEST (1) - Connected to WaveRT Capture Bridge Pin
     {
         0, 0, 0,
         NULL,

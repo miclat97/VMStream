@@ -1,12 +1,12 @@
 // ============================================================================
-// HostAudioEngine.cs — Low-Latency WASAPI Speaker Render & Privacy-Locked Mic
-// Project: VMStream — Host Console Client (HvConsole.Host)
+// HostAudioEngine.cs - Low-Latency WASAPI Speaker Render & Privacy-Locked Mic
+// Project: VMStream - Host Console Client (HvConsole.Host)
 //
 // Strict Privacy Architecture:
 //   1. Default Microphone state on startup and VM connect is OFF (DISCONNECTED).
 //   2. When OFF (or when GateMicOnGuestKsState=true and no Guest app has opened
 //      the microphone pin in KSSTATE_RUN), the Host holds ZERO open IAudioClient
-//      handles — ensuring the Windows 11 system tray mic icon stays completely OFF.
+//      handles - ensuring the Windows 11 system tray mic icon stays completely OFF.
 //   3. Toggling OFF immediately stops and releases IAudioCaptureClient,
 //      IAudioClient, and IMMDevice via Marshal.FinalReleaseComObject.
 // ============================================================================

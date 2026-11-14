@@ -1,5 +1,5 @@
 // ============================================================================
-// VmPickerForm.cs — Sleek Dark-Mode Local Hyper-V Virtual Machine Launcher
+// VmPickerForm.cs - Sleek Dark-Mode Local Hyper-V Virtual Machine Launcher
 // Enumerates VMs via WMI root\virtualization\v2 (State, CPU, RAM, GPU-PV).
 // Supports starting stopped VMs and opening multiple concurrent isolated
 // Console Session windows.
@@ -27,7 +27,7 @@ public sealed class VmPickerForm : Form
 
     public VmPickerForm(bool defaultFullscreen = false, bool defaultTcpFallback = false)
     {
-        Text = "VMStream — Zero-Artifact Hyper-V Console Client";
+        Text = "VMStream - Zero-Artifact Hyper-V Console Client";
         Size = new Size(920, 560);
         MinimumSize = new Size(780, 460);
         StartPosition = FormStartPosition.CenterScreen;
@@ -45,7 +45,7 @@ public sealed class VmPickerForm : Form
 
         var lblTitle = new Label
         {
-            Text = "⚡ VMStream — Hyper-V Console Launcher",
+            Text = "\u26A1 VMStream - Hyper-V Console Launcher",
             Font = new Font("Segoe UI Semibold", 15f, FontStyle.Bold),
             ForeColor = Color.FromArgb(56, 189, 248),
             AutoSize = true,
@@ -54,7 +54,7 @@ public sealed class VmPickerForm : Form
 
         var lblSubtitle = new Label
         {
-            Text = "Strict Console Session (Port 2179 / GPU-PV)  •  AF_HYPERV 48 kHz WaveRT Audio  •  10-Point VHF Multi-Touch Digitizer",
+            Text = "Strict Console Session (Port 2179 / GPU-PV)  \u2022  AF_HYPERV 48 kHz WaveRT Audio  \u2022  10-Point VHF Multi-Touch Digitizer",
             Font = new Font("Segoe UI", 9.0f),
             ForeColor = Color.FromArgb(148, 163, 184),
             AutoSize = true,
@@ -125,7 +125,7 @@ public sealed class VmPickerForm : Form
 
         _btnRefresh = new Button
         {
-            Text = "↻ Refresh",
+            Text = "\u21BB Refresh",
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
             ForeColor = Color.FromArgb(226, 232, 240),
@@ -138,7 +138,7 @@ public sealed class VmPickerForm : Form
 
         _btnStartVm = new Button
         {
-            Text = "▶ Start VM",
+            Text = "\u25B6 Start VM",
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
             ForeColor = Color.FromArgb(226, 232, 240),
@@ -219,7 +219,7 @@ public sealed class VmPickerForm : Form
                 item.SubItems.Add($"{vm.CpuCount} vCPU");
                 item.SubItems.Add($"{vm.MemoryMb:N0} MB");
                 item.SubItems.Add(vm.HasGpuPv ? "Yes (GPU-PV)" : "Synthetic");
-                item.SubItems.Add(vm.IsRunning ? $"{(int)vm.Uptime.TotalHours:D2}:{vm.Uptime.Minutes:D2}:{vm.Uptime.Seconds:D2}" : "—");
+                item.SubItems.Add(vm.IsRunning ? $"{(int)vm.Uptime.TotalHours:D2}:{vm.Uptime.Minutes:D2}:{vm.Uptime.Seconds:D2}" : "-");
                 item.SubItems.Add(vm.PcbGuidString);
 
                 _vmListView.Items.Add(item);
@@ -289,7 +289,7 @@ public sealed class VmPickerForm : Form
             DialogResult dr = MessageBox.Show(
                 this,
                 $"Virtual machine '{vm.Name}' is currently {vm.StateDisplay}.\nWould you like to start it now before connecting?",
-                "VMStream — Start Virtual Machine",
+                "VMStream - Start Virtual Machine",
                 MessageBoxButtons.YesNoCancel,
                 MessageBoxIcon.Question
             );

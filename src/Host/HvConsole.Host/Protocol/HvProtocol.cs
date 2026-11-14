@@ -1,6 +1,6 @@
 // ============================================================================
-// HvProtocol.cs — C# Wire Protocol Structures & Hyper-V Socket GUIDs
-// Project: VMStream — Host Console Client (HvConsole.Host)
+// HvProtocol.cs - C# Wire Protocol Structures & Hyper-V Socket GUIDs
+// Project: VMStream - Host Console Client (HvConsole.Host)
 // Exact binary mirror of src/Shared/HvProtocol.h (#pragma pack(push, 1))
 // ============================================================================
 using System;

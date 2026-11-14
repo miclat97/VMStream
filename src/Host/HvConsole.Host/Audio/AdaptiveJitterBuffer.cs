@@ -1,5 +1,5 @@
 // ============================================================================
-// AdaptiveJitterBuffer.cs — Low-Latency Circular Buffer & Clock Drift Regulator
+// AdaptiveJitterBuffer.cs - Low-Latency Circular Buffer & Clock Drift Regulator
 // Maintains ~25ms target buffer level (48 kHz, 16-bit Stereo PCM):
 //   - If buffer exceeds 35ms: drops 1 stereo sample per 250 samples (+0.4% rate)
 //   - If buffer drops below 15ms: interpolates/duplicates 1 stereo sample per 250 (-0.4% rate)

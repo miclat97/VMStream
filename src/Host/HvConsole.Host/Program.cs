@@ -1,5 +1,5 @@
 // ============================================================================
-// Program.cs — Entry Point & CLI Argument Parser for HvConsole.Host
+// Program.cs - Entry Point & CLI Argument Parser for HvConsole.Host
 // Supports:
 //   HvConsole.Host.exe --vm "VM Name" [--fullscreen] [--tcp-fallback]
 //   HvConsole.Host.exe --guid "<GUID>" [--fullscreen] [--tcp-fallback]
@@ -78,7 +78,7 @@ internal static class Program
                 {
                     MessageBox.Show(
                         $"Failed to query Hyper-V WMI for '{targetVmNameOrGuid}':\n{ex.Message}",
-                        "VMStream — WMI Discovery Error",
+                        "VMStream - WMI Discovery Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error
                     );
@@ -90,7 +90,7 @@ internal static class Program
             {
                 MessageBox.Show(
                     $"Could not find a local Hyper-V virtual machine matching '{targetVmNameOrGuid}'.",
-                    "VMStream — VM Not Found",
+                    "VMStream - VM Not Found",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning
                 );

@@ -13,7 +13,7 @@
        MSVC cl.exe + link.exe response-file fallback).
     4. Compiles src\Guest\HvTouchHid (KMDF + VHF) and src\Guest\HvVirtualAudio (PortCls WaveRT)
        via MSBuild (with a direct MSVC /kernel cl.exe + link.exe /DRIVER response-file fallback
-       against WDK headers & libraries so drivers build cleanly even on standalone BuildTools).
+       against WDK headers and libraries so drivers build cleanly even on standalone BuildTools).
     5. Stages compiled Host and Guest deployment bundles into build\dist\Host and build\dist\Guest.
 #>
 [CmdletBinding()]
@@ -61,7 +61,7 @@ if (-not $SkipPrerequisites -and (Test-Path $PrereqScript)) {
 }
 
 Write-Host "`n======================================================================" -ForegroundColor Cyan
-Write-Host " VMStream Build Pipeline — Configuration: $Configuration (x64)"           -ForegroundColor Cyan
+Write-Host " VMStream Build Pipeline - Configuration: $Configuration (x64)"           -ForegroundColor Cyan
 Write-Host "======================================================================" -ForegroundColor Cyan
 
 # ============================================================================
@@ -124,7 +124,7 @@ if (-not $BridgeBuilt -and $Toolchain.ClExe -and $Toolchain.SdkVersion) {
     $OutExe  = Join-Path $BridgeBinDir "HvGuestBridge.exe"
 
     $RspFile = Join-Path $BridgeObjDir "compile_bridge.rsp"
-    $RspContent = @(
+    [string[]]$RspContent = @(
         "/nologo"
         "/std:c++20"
         "/EHsc"
@@ -157,7 +157,7 @@ if (-not $BridgeBuilt -and $Toolchain.ClExe -and $Toolchain.SdkVersion) {
         "user32.lib"
         "kernel32.lib"
     )
-    Set-Content -Path $RspFile -Value $RspContent -Encoding UTF8
+    [System.IO.File]::WriteAllLines($RspFile, $RspContent)
 
     & $Toolchain.ClExe "@$RspFile"
     if ($LASTEXITCODE -eq 0 -and (Test-Path $OutExe)) {
@@ -170,7 +170,7 @@ if (-not $BridgeBuilt) {
 }
 
 Copy-Item -Path (Join-Path $BridgeBinDir "HvGuestBridge.exe") -Destination $DistGuest -Force
-Write-Host "      -> Built & staged: $DistGuest\HvGuestBridge.exe" -ForegroundColor Green
+Write-Host "      -> Built and staged: $DistGuest\HvGuestBridge.exe" -ForegroundColor Green
 
 # ============================================================================
 # 3 & 4. Build WDK Drivers (HvTouchHid.sys & HvVirtualAudio.sys)
@@ -219,7 +219,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
         $KmdfMinor   = ($Toolchain.KmdfVersion -split '\.')[1]
 
         $ClTouchRsp = Join-Path $TouchObjDir "cl_touch.rsp"
-        Set-Content -Path $ClTouchRsp -Encoding UTF8 -Value @(
+        [string[]]$ClTouchLines = @(
             "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/kernel", "/GS", "/O2", "/std:c++20",
             "/D_WIN64", "/D_AMD64_", "/DAMD64", "/D_KERNEL_MODE", "/DPOOL_NX_OPTIN=1",
             "/DKMDF_VERSION_MAJOR=1", "/DKMDF_VERSION_MINOR=$KmdfMinor",
@@ -233,11 +233,12 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
             "/Fo`"$TouchObj`"",
             "`"$(Join-Path $TouchSrcDir 'Driver.cpp')`""
         )
+        [System.IO.File]::WriteAllLines($ClTouchRsp, $ClTouchLines)
 
         & $Toolchain.ClExe "@$ClTouchRsp"
         if ($LASTEXITCODE -eq 0) {
             $LinkTouchRsp = Join-Path $TouchObjDir "link_touch.rsp"
-            Set-Content -Path $LinkTouchRsp -Encoding UTF8 -Value @(
+            [string[]]$LinkTouchLines = @(
                 "/NOLOGO", "/DRIVER", "/SUBSYSTEM:NATIVE", "/NODEFAULTLIB", "/INCREMENTAL:NO",
                 "/OPT:REF", "/OPT:ICF", "/RELEASE", "/ENTRY:FxDriverEntry",
                 "/MERGE:_TEXT=.text;_PAGE=PAGE",
@@ -249,6 +250,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
                 "ntoskrnl.lib", "hal.lib", "wmilib.lib", "BufferOverflowFastFailK.lib",
                 "WdfLdr.lib", "WdfDriverEntry.lib", "vhfkm.lib", "wdmsec.lib"
             )
+            [System.IO.File]::WriteAllLines($LinkTouchRsp, $LinkTouchLines)
             & $Toolchain.LinkExe "@$LinkTouchRsp"
             if ($LASTEXITCODE -eq 0 -and (Test-Path $TouchSys)) {
                 $TouchBuilt = $true
@@ -264,7 +266,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
     New-Item -ItemType Directory -Path $TouchOut -Force | Out-Null
     Copy-Item -Path (Join-Path $RepoRoot "src\Guest\HvTouchHid\HvTouchHid.inf") -Destination $TouchOut -Force
     Copy-Item -Path (Join-Path $TouchBinDir "HvTouchHid.sys") -Destination $TouchOut -Force
-    Write-Host "      -> Built & staged: $TouchOut\HvTouchHid.sys" -ForegroundColor Green
+    Write-Host "      -> Built and staged: $TouchOut\HvTouchHid.sys" -ForegroundColor Green
 
     # ------------------------------------------------------------------------
     # 4. HvVirtualAudio.sys (PortCls / WaveRT Virtual Audio Driver)
@@ -299,7 +301,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
         $AudioSys    = Join-Path $AudioBinDir "HvVirtualAudio.sys"
 
         $ClAudioRsp = Join-Path $AudioObjDir "cl_audio.rsp"
-        Set-Content -Path $ClAudioRsp -Encoding UTF8 -Value @(
+        [string[]]$ClAudioLines = @(
             "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/kernel", "/GS", "/O2", "/std:c++20",
             "/D_WIN64", "/D_AMD64_", "/DAMD64", "/D_KERNEL_MODE", "/DPOOL_NX_OPTIN=1",
             "/I`"$AudioSrcDir`"",
@@ -313,11 +315,12 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
             "`"$(Join-Path $AudioSrcDir 'TopologyMiniport.cpp')`"",
             "`"$(Join-Path $AudioSrcDir 'WaveRTMiniport.cpp')`""
         )
+        [System.IO.File]::WriteAllLines($ClAudioRsp, $ClAudioLines)
 
         & $Toolchain.ClExe "@$ClAudioRsp"
         if ($LASTEXITCODE -eq 0) {
             $LinkAudioRsp = Join-Path $AudioObjDir "link_audio.rsp"
-            Set-Content -Path $LinkAudioRsp -Encoding UTF8 -Value @(
+            [string[]]$LinkAudioLines = @(
                 "/NOLOGO", "/DRIVER:WDM", "/SUBSYSTEM:NATIVE", "/NODEFAULTLIB", "/INCREMENTAL:NO",
                 "/OPT:REF", "/OPT:ICF", "/RELEASE", "/ENTRY:GsDriverEntry",
                 "/MERGE:_TEXT=.text;_PAGE=PAGE",
@@ -330,6 +333,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
                 "ntoskrnl.lib", "hal.lib", "wmilib.lib", "BufferOverflowFastFailK.lib",
                 "portcls.lib", "stdunk.lib", "ksguid.lib", "wdmsec.lib"
             )
+            [System.IO.File]::WriteAllLines($LinkAudioRsp, $LinkAudioLines)
             & $Toolchain.LinkExe "@$LinkAudioRsp"
             if ($LASTEXITCODE -eq 0 -and (Test-Path $AudioSys)) {
                 $AudioBuilt = $true
@@ -345,7 +349,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
     New-Item -ItemType Directory -Path $AudioOut -Force | Out-Null
     Copy-Item -Path (Join-Path $RepoRoot "src\Guest\HvVirtualAudio\HvVirtualAudio.inf") -Destination $AudioOut -Force
     Copy-Item -Path (Join-Path $AudioBinDir "HvVirtualAudio.sys") -Destination $AudioOut -Force
-    Write-Host "      -> Built & staged: $AudioOut\HvVirtualAudio.sys" -ForegroundColor Green
+    Write-Host "      -> Built and staged: $AudioOut\HvVirtualAudio.sys" -ForegroundColor Green
 }
 
 Copy-Item -Path (Join-Path $PSScriptRoot "Install-GuestDrivers.ps1") -Destination $DistGuest -Force

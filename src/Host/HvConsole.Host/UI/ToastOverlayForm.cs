@@ -1,5 +1,5 @@
 // ============================================================================
-// ToastOverlayForm.cs — Non-Intrusive Corner Indicator Overlay
+// ToastOverlayForm.cs - Non-Intrusive Corner Indicator Overlay
 // Displays brief status notifications (e.g., Ctrl+Alt+Shift+M Mic Toggle)
 // with WS_EX_NOACTIVATE so focus is never stolen from the Hyper-V VM Console.
 // ============================================================================

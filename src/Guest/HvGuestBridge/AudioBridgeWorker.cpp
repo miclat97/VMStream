@@ -1,6 +1,6 @@
 // ============================================================================
-// AudioBridgeWorker.cpp — Guest Bidirectional Audio & KSSTATE_RUN Gate Bridge
-// Project: VMStream — Guest Service Bridge (HvGuestBridge.exe)
+// AudioBridgeWorker.cpp - Guest Bidirectional Audio & KSSTATE_RUN Gate Bridge
+// Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
 #include "AudioBridgeWorker.h"
 #include <vector>
@@ -145,7 +145,7 @@ bool AudioBridgeWorker::IoctlSync(
 }
 
 // ============================================================================
-// MainConnectionLoop — Connects AF_HYPERV Audio & Receives Host Mic PCM
+// MainConnectionLoop - Connects AF_HYPERV Audio & Receives Host Mic PCM
 // ============================================================================
 void AudioBridgeWorker::MainConnectionLoop()
 {
@@ -259,7 +259,7 @@ void AudioBridgeWorker::MainConnectionLoop()
 }
 
 // ============================================================================
-// RenderSenderLoop — Pumps 10ms Speaker PCM Frames (48kHz 16-bit Stereo) to Host
+// RenderSenderLoop - Pumps 10ms Speaker PCM Frames (48kHz 16-bit Stereo) to Host
 // ============================================================================
 void AudioBridgeWorker::RenderSenderLoop(HANDLE stopSessionEvent)
 {
@@ -335,7 +335,7 @@ void AudioBridgeWorker::RenderSenderLoop(HANDLE stopSessionEvent)
 }
 
 // ============================================================================
-// StateMonitorLoop — Inverted Call Monitor for KSSTATE_RUN Transitions
+// StateMonitorLoop - Inverted Call Monitor for KSSTATE_RUN Transitions
 // Immediately notifies Host when a Guest app opens/closes the Microphone!
 // ============================================================================
 void AudioBridgeWorker::StateMonitorLoop(HANDLE stopSessionEvent)

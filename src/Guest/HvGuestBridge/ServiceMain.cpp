@@ -1,5 +1,5 @@
 // ============================================================================
-// ServiceMain.cpp — Guest Windows Service Entry Point (HvGuestBridge.exe)
+// ServiceMain.cpp - Guest Windows Service Entry Point (HvGuestBridge.exe)
 // Connects AF_HYPERV (HV_GUID_PARENT) sockets to HvTouchHid & HvVirtualAudio
 // ============================================================================
 #include "TouchBridgeWorker.h"

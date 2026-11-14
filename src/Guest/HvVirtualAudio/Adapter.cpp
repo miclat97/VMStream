@@ -1,6 +1,6 @@
 // ============================================================================
-// Adapter.cpp — PortCls Adapter Driver, Subdevice Registration & IOCTL Bridge
-// Project: VMStream — Guest Virtual Audio Driver (HvVirtualAudio.sys)
+// Adapter.cpp - PortCls Adapter Driver, Subdevice Registration & IOCTL Bridge
+// Project: VMStream - Guest Virtual Audio Driver (HvVirtualAudio.sys)
 // ============================================================================
 #include "AudioCommon.h"
 #include "TopologyMiniport.h"
@@ -18,7 +18,7 @@ static PDRIVER_DISPATCH g_PortClsIoctlDispatch     = NULL;
 static PDRIVER_UNLOAD   g_PortClsUnload            = NULL;
 
 // ============================================================================
-// CAdapterCommon — Implements IHvAudioAdapterCommon & Cancel-Safe Inverted Call
+// CAdapterCommon - Implements IHvAudioAdapterCommon & Cancel-Safe Inverted Call
 // ============================================================================
 class CAdapterCommon :
     public IHvAudioAdapterCommon,
@@ -463,7 +463,7 @@ HvAudioDriverUnload(
 }
 
 // ============================================================================
-// InstallSubdeviceHelper — Creates Port + Miniport Pair and Registers Subdevice
+// InstallSubdeviceHelper - Creates Port + Miniport Pair and Registers Subdevice
 // ============================================================================
 static NTSTATUS
 InstallSubdevice(
@@ -523,7 +523,7 @@ InstallSubdevice(
 }
 
 // ============================================================================
-// StartDevice — Initializes AdapterCommon & Registers Speaker + Mic Endpoints
+// StartDevice - Initializes AdapterCommon & Registers Speaker + Mic Endpoints
 // ============================================================================
 static NTSTATUS
 HvAudioStartDevice(

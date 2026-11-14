@@ -2,7 +2,7 @@
 setlocal EnableExtensions
 
 echo ======================================================================
-echo  VMStream — Auto-Setup Prerequisites ^& Full Build Launcher
+echo  VMStream - Auto-Setup Prerequisites and Full Build Launcher
 echo ======================================================================
 
 :: Check for Administrator privileges (required to auto-install VS Build Tools / WDK)

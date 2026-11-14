@@ -1,7 +1,7 @@
 // ============================================================================
-// HyperVVmDiscovery.cs — Hyper-V WMI v2 VM Enumeration & Control
+// HyperVVmDiscovery.cs - Hyper-V WMI v2 VM Enumeration & Control
 // Queries root\virtualization\v2 -> Msvm_ComputerSystem, CPU, RAM, and GPU-PV
-// Project: VMStream — Host Console Client (HvConsole.Host)
+// Project: VMStream - Host Console Client (HvConsole.Host)
 // ============================================================================
 using System;
 using System.Collections.Generic;

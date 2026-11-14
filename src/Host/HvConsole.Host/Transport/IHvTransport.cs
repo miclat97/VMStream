@@ -1,6 +1,6 @@
 // ============================================================================
-// IHvTransport.cs — Host Transport Abstraction Interface
-// Project: VMStream — Host Console Client (HvConsole.Host)
+// IHvTransport.cs - Host Transport Abstraction Interface
+// Project: VMStream - Host Console Client (HvConsole.Host)
 // ============================================================================
 using System;
 using System.Threading;

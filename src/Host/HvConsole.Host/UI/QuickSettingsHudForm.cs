@@ -1,5 +1,5 @@
 // ============================================================================
-// QuickSettingsHudForm.cs — Sleek Dark Frameless Floating Quick-Settings HUD
+// QuickSettingsHudForm.cs - Sleek Dark Frameless Floating Quick-Settings HUD
 // Toggled via Ctrl + Alt + Shift + H (auto-dismissable with Esc).
 // Displays VM telemetry, AF_HYPERV status, Speaker Volume/Mute, and the
 // Privacy-Locked Host Microphone Toggle.
@@ -71,7 +71,7 @@ public sealed class QuickSettingsHudForm : Form
 
         _lblVmHeader = new Label
         {
-            Text = $"⚡ {_vmInfo.Name}   ({(_vmInfo.HasGpuPv ? "GPU-PV Accelerated" : "Synthetic Console")})",
+            Text = $"\u26A1 {_vmInfo.Name}   ({(_vmInfo.HasGpuPv ? "GPU-PV Accelerated" : "Synthetic Console")})",
             Font = headerFont,
             ForeColor = Color.FromArgb(56, 189, 248),
             Location = new Point(20, 18),
@@ -80,7 +80,7 @@ public sealed class QuickSettingsHudForm : Form
 
         var btnCloseHud = new Button
         {
-            Text = "✕",
+            Text = "\u2715",
             Font = bodyFont,
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
@@ -120,7 +120,7 @@ public sealed class QuickSettingsHudForm : Form
 
         _btnSpeakerMute = new Button
         {
-            Text = "🔊 Unmuted",
+            Text = "\U0001F50A Unmuted",
             Font = bodyFont,
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
@@ -206,7 +206,7 @@ public sealed class QuickSettingsHudForm : Form
         // --- Bottom Action Bar ---
         _btnToggleFullscreen = new Button
         {
-            Text = "⛶  Toggle Borderless Fullscreen (Ctrl+Alt+Pause)",
+            Text = "\u26F6  Toggle Borderless Fullscreen (Ctrl+Alt+Pause)",
             Font = bodyFont,
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
@@ -335,19 +335,19 @@ public sealed class QuickSettingsHudForm : Form
 
         if (_audioEngine.SpeakerMuted)
         {
-            _btnSpeakerMute.Text = "🔇 Muted";
+            _btnSpeakerMute.Text = "\U0001F507 Muted";
             _btnSpeakerMute.BackColor = Color.FromArgb(127, 29, 29);
         }
         else
         {
-            _btnSpeakerMute.Text = "🔊 Unmuted";
+            _btnSpeakerMute.Text = "\U0001F50A Unmuted";
             _btnSpeakerMute.BackColor = Color.FromArgb(30, 41, 59);
         }
 
         // Microphone Privacy Button State
         if (!_audioEngine.IsMicUserEnabled)
         {
-            _btnMicToggle.Text = "🔒  MICROPHONE OFF — PRIVACY LOCKED (Click to Enable)";
+            _btnMicToggle.Text = "\U0001F512  MICROPHONE OFF - PRIVACY LOCKED (Click to Enable)";
             _btnMicToggle.BackColor = Color.FromArgb(20, 83, 45);
             _btnMicToggle.ForeColor = Color.FromArgb(187, 247, 208);
             _btnMicToggle.FlatAppearance.BorderColor = Color.FromArgb(34, 197, 94);
@@ -355,7 +355,7 @@ public sealed class QuickSettingsHudForm : Form
         }
         else if (_audioEngine.IsMicHardwareOpen)
         {
-            _btnMicToggle.Text = "🎙️  MICROPHONE LIVE — STREAMING TO GUEST VM (Click to Mute)";
+            _btnMicToggle.Text = "\U0001F399\uFE0F  MICROPHONE LIVE - STREAMING TO GUEST VM (Click to Mute)";
             _btnMicToggle.BackColor = Color.FromArgb(153, 27, 27);
             _btnMicToggle.ForeColor = Color.White;
             _btnMicToggle.FlatAppearance.BorderColor = Color.FromArgb(248, 113, 113);
@@ -363,7 +363,7 @@ public sealed class QuickSettingsHudForm : Form
         }
         else
         {
-            _btnMicToggle.Text = "🟡  MICROPHONE ARMED — WAITING FOR GUEST APP (Click to Lock)";
+            _btnMicToggle.Text = "\U0001F7E1  MICROPHONE ARMED - WAITING FOR GUEST APP (Click to Lock)";
             _btnMicToggle.BackColor = Color.FromArgb(113, 63, 18);
             _btnMicToggle.ForeColor = Color.FromArgb(254, 240, 138);
             _btnMicToggle.FlatAppearance.BorderColor = Color.FromArgb(234, 179, 8);

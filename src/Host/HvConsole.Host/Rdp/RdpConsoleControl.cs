@@ -1,5 +1,5 @@
 // ============================================================================
-// RdpConsoleControl.cs — Native mstscax.dll ActiveX Host for Strict Hyper-V Console
+// RdpConsoleControl.cs - Native mstscax.dll ActiveX Host for Strict Hyper-V Console
 // Configures MsRdpClient10NotSafeForScripting / MsRdpClient9NotSafeForScripting
 // strictly in Console Session mode (Port 2179, PCB = clean GUID without braces,
 // DisableEnhancedMode = true, DisplayConnectionBar = false).

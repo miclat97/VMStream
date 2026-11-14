@@ -1,5 +1,5 @@
 // ============================================================================
-// LowLevelKeyboardHook.cs — WH_KEYBOARD_LL Hook for ActiveX-Focused Hotkeys
+// LowLevelKeyboardHook.cs - WH_KEYBOARD_LL Hook for ActiveX-Focused Hotkeys
 // Intercepts host hotkeys before mstscax.dll swallows keyboard input:
 //   - Ctrl + Alt + Pause (or Ctrl + Alt + Shift + F): Toggle Borderless Fullscreen
 //   - Ctrl + Alt + Shift + H: Toggle Floating Quick-Settings HUD

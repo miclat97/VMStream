@@ -1,6 +1,6 @@
 // ============================================================================
-// HvSocketTransport.cs — Native AF_HYPERV Host Listener & TCP Fallback
-// Project: VMStream — Host Console Client (HvConsole.Host)
+// HvSocketTransport.cs - Native AF_HYPERV Host Listener & TCP Fallback
+// Project: VMStream - Host Console Client (HvConsole.Host)
 // Binds SOCKADDR_HV specifically to VmId = TargetVmId (never HV_GUID_WILDCARD)
 // to support multiple simultaneous isolated VM console sessions.
 // ============================================================================

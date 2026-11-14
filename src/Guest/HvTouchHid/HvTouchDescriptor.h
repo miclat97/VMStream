@@ -1,6 +1,6 @@
 // ============================================================================
-// HvTouchDescriptor.h — Complete HID Multi-Touch Report Descriptor for VHF
-// Project: VMStream — Guest Multi-Touch Digitizer Driver (HvTouchHid.sys)
+// HvTouchDescriptor.h - Complete HID Multi-Touch Report Descriptor for VHF
+// Project: VMStream - Guest Multi-Touch Digitizer Driver (HvTouchHid.sys)
 // ============================================================================
 #pragma once
 
@@ -92,7 +92,7 @@ static const uint8_t g_HvTouchReportDescriptor[] = {
     0x81, 0x02,                         //   Input (Data,Var,Abs) -> 2 bytes
 
     // =========================================================================
-    // REPORT ID 2: Feature Report — Contact Count Maximum (2 bytes)
+    // REPORT ID 2: Feature Report - Contact Count Maximum (2 bytes)
     // =========================================================================
     0x85, 0x02,                         //   Report ID (2)
     0x09, 0x55,                         //   Usage (Contact Count Maximum)
@@ -103,7 +103,7 @@ static const uint8_t g_HvTouchReportDescriptor[] = {
     0xB1, 0x02,                         //   Feature (Data,Var,Abs)
 
     // =========================================================================
-    // REPORT ID 3: Feature Report — Windows 8/10/11 THQA Certification Blob (257 bytes)
+    // REPORT ID 3: Feature Report - Windows 8/10/11 THQA Certification Blob (257 bytes)
     // =========================================================================
     0x85, 0x03,                         //   Report ID (3)
     0x06, 0x00, 0xFF,                   //   Usage Page (Vendor Defined 0xFF00)

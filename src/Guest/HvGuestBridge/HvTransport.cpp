@@ -1,6 +1,6 @@
 // ============================================================================
-// HvTransport.cpp — Native Hyper-V Socket (AF_HYPERV) & TCP Fallback Transport
-// Project: VMStream — Guest Service Bridge (HvGuestBridge.exe)
+// HvTransport.cpp - Native Hyper-V Socket (AF_HYPERV) & TCP Fallback Transport
+// Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
 #include "HvTransport.h"
 

@@ -1,5 +1,5 @@
 ; ============================================================================
-; HvTouchHid.inf — WDK Installation File for VMStream Virtual Multi-Touch HID
+; HvTouchHid.inf - WDK Installation File for VMStream Virtual Multi-Touch HID
 ; Uses built-in mshidkmdf.sys as Function Driver and HvTouchHid.sys (VHF) as LowerFilter
 ; ============================================================================
 

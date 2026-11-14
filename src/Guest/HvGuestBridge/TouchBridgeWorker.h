@@ -1,6 +1,6 @@
 // ============================================================================
-// TouchBridgeWorker.h — Guest Multi-Touch AF_HYPERV to VHF Driver Bridge
-// Project: VMStream — Guest Service Bridge (HvGuestBridge.exe)
+// TouchBridgeWorker.h - Guest Multi-Touch AF_HYPERV to VHF Driver Bridge
+// Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
 #pragma once
 

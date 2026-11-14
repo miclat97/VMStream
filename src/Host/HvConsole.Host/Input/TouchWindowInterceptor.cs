@@ -1,5 +1,5 @@
 // ============================================================================
-// TouchWindowInterceptor.cs — IHWindowClass Subclassing & WM_POINTER Capture
+// TouchWindowInterceptor.cs - IHWindowClass Subclassing & WM_POINTER Capture
 // Intercepts raw multi-touch input directly on mstscax.dll's internal
 // IHWindowClass viewport via SetWindowSubclass, normalizes coordinates to
 // [0..32767], streams 64-byte HID frames over AF_HYPERV, and returns 0 so

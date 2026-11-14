@@ -1,6 +1,6 @@
 // ============================================================================
-// TouchBridgeWorker.cpp — Guest Multi-Touch AF_HYPERV to VHF Driver Bridge
-// Project: VMStream — Guest Service Bridge (HvGuestBridge.exe)
+// TouchBridgeWorker.cpp - Guest Multi-Touch AF_HYPERV to VHF Driver Bridge
+// Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
 #include "TouchBridgeWorker.h"
 #include <vector>
@@ -82,7 +82,7 @@ void TouchBridgeWorker::CloseDriverHandle()
 }
 
 // ============================================================================
-// ReleaseAllTouchContacts — Anti-Stuck-Touch Protection
+// ReleaseAllTouchContacts - Anti-Stuck-Touch Protection
 // Immediately submits a zeroed 64-byte HV_TOUCH_INPUT_REPORT (ContactCount=0,
 // all 10 TipSwitch=0) + IOCTL_HVTOUCH_RESET_CONTACTS whenever the AF_HYPERV
 // socket disconnects mid-gesture.

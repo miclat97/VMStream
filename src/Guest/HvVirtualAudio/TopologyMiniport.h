@@ -1,6 +1,6 @@
 // ============================================================================
-// TopologyMiniport.h — PortCls Topology Miniport for Speakers & Microphone
-// Project: VMStream — Guest Virtual Audio Driver (HvVirtualAudio.sys)
+// TopologyMiniport.h - PortCls Topology Miniport for Speakers & Microphone
+// Project: VMStream - Guest Virtual Audio Driver (HvVirtualAudio.sys)
 // ============================================================================
 #pragma once
 

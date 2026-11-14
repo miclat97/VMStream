@@ -1,5 +1,5 @@
 // ============================================================================
-// ConsoleSessionForm.cs — Main Hyper-V Console Window & Subsystems Coordinator
+// ConsoleSessionForm.cs - Main Hyper-V Console Window & Subsystems Coordinator
 // Hosts RdpConsoleControl (strictly Console Session on port 2179),
 // AF_HYPERV Audio & Touch Transports, IHWindowClass Touch Subclassing,
 // WASAPI Audio Engine, Low-Level Hotkey Hook, and Borderless Fullscreen.
@@ -43,7 +43,7 @@ public sealed class ConsoleSessionForm : Form
         _vmInfo = vmInfo;
         _startInFullscreen = startInFullscreen;
 
-        Text = $"VMStream — {_vmInfo.Name} [Console Session | Mic: OFF (Locked)]";
+        Text = $"VMStream - {_vmInfo.Name} [Console Session | Mic: OFF (Locked)]";
         BackColor = Color.FromArgb(10, 14, 23);
         ForeColor = Color.FromArgb(241, 245, 249);
         StartPosition = FormStartPosition.CenterScreen;
@@ -110,7 +110,7 @@ public sealed class ConsoleSessionForm : Form
         _lblBannerMessage = new Label
         {
             Dock = DockStyle.Fill,
-            Text = $"Connecting to Hyper-V Console '{_vmInfo.Name}' ({_vmInfo.PcbGuidString}) on port 2179...  |  Hotkeys: Ctrl+Alt+Shift+H (HUD)  •  Ctrl+Alt+Shift+M (Mic)  •  Ctrl+Alt+Pause (Fullscreen)",
+            Text = $"Connecting to Hyper-V Console '{_vmInfo.Name}' ({_vmInfo.PcbGuidString}) on port 2179...  |  Hotkeys: Ctrl+Alt+Shift+H (HUD)  \u2022  Ctrl+Alt+Shift+M (Mic)  \u2022  Ctrl+Alt+Pause (Fullscreen)",
             Font = new Font("Segoe UI", 9.0f),
             ForeColor = Color.FromArgb(148, 163, 184),
             TextAlign = ContentAlignment.MiddleCenter
@@ -330,8 +330,8 @@ public sealed class ConsoleSessionForm : Form
         {
             _toastForm.ShowToast(
                 this,
-                "🔒 Host Microphone: MUTED & LOCKED",
-                "Host WASAPI IAudioClient closed — Windows mic tray icon OFF",
+                "\U0001F512 Host Microphone: MUTED & LOCKED",
+                "Host WASAPI IAudioClient closed - Windows mic tray icon OFF",
                 Color.FromArgb(34, 197, 94),
                 2400
             );
@@ -340,7 +340,7 @@ public sealed class ConsoleSessionForm : Form
         {
             _toastForm.ShowToast(
                 this,
-                "🎙️ Host Microphone: LIVE STREAMING",
+                "\U0001F399\uFE0F Host Microphone: LIVE STREAMING",
                 "Streaming 48 kHz PCM over AF_HYPERV to Guest VM",
                 Color.FromArgb(239, 68, 68),
                 2400
@@ -350,7 +350,7 @@ public sealed class ConsoleSessionForm : Form
         {
             _toastForm.ShowToast(
                 this,
-                "🟡 Host Microphone: ARMED (KSSTATE Gate)",
+                "\U0001F7E1 Host Microphone: ARMED (KSSTATE Gate)",
                 "Host mic will open automatically when a Guest app records",
                 Color.FromArgb(234, 179, 8),
                 2400
@@ -364,7 +364,7 @@ public sealed class ConsoleSessionForm : Form
             ? "Mic: OFF (Locked)"
             : (_audioEngine.IsMicHardwareOpen ? "Mic: LIVE" : "Mic: ARMED");
 
-        Text = $"VMStream — {_vmInfo.Name} [Console Session | {micTag}]";
+        Text = $"VMStream - {_vmInfo.Name} [Console Session | {micTag}]";
 
         if (_hudForm.Visible)
         {

@@ -1,6 +1,6 @@
 // ============================================================================
-// Driver.h — KMDF + Virtual HID Framework (VHF) Multi-Touch Digitizer Driver
-// Project: VMStream — HvTouchHid.sys
+// Driver.h - KMDF + Virtual HID Framework (VHF) Multi-Touch Digitizer Driver
+// Project: VMStream - HvTouchHid.sys
 // ============================================================================
 #pragma once
 

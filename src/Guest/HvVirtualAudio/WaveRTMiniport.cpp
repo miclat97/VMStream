@@ -1,6 +1,6 @@
 // ============================================================================
-// WaveRTMiniport.cpp — PortCls WaveRT Miniport & Stream Implementation
-// Project: VMStream — Guest Virtual Audio Driver (HvVirtualAudio.sys)
+// WaveRTMiniport.cpp - PortCls WaveRT Miniport & Stream Implementation
+// Project: VMStream - Guest Virtual Audio Driver (HvVirtualAudio.sys)
 // ============================================================================
 #include "WaveRTMiniport.h"
 
@@ -111,7 +111,7 @@ static PKSDATARANGE g_WaveBridgeDataRangePointers[] = {
 // WaveRT Filter Pin Descriptors & Connections
 // ============================================================================
 static PCPIN_DESCRIPTOR g_RenderWavePins[] = {
-    // KSPIN_WAVERT_HOST_OR_SINK (0) — System Render Stream Sink
+    // KSPIN_WAVERT_HOST_OR_SINK (0) - System Render Stream Sink
     {
         2, 2, 0,
         NULL,
@@ -126,7 +126,7 @@ static PCPIN_DESCRIPTOR g_RenderWavePins[] = {
             0
         }
     },
-    // KSPIN_WAVERT_BRIDGE (1) — Bridge to Render Topology
+    // KSPIN_WAVERT_BRIDGE (1) - Bridge to Render Topology
     {
         0, 0, 0,
         NULL,
@@ -144,7 +144,7 @@ static PCPIN_DESCRIPTOR g_RenderWavePins[] = {
 };
 
 static PCPIN_DESCRIPTOR g_CaptureWavePins[] = {
-    // KSPIN_WAVERT_HOST_OR_SINK (0) — System Capture Stream Source
+    // KSPIN_WAVERT_HOST_OR_SINK (0) - System Capture Stream Source
     {
         2, 2, 0,
         NULL,
@@ -159,7 +159,7 @@ static PCPIN_DESCRIPTOR g_CaptureWavePins[] = {
             0
         }
     },
-    // KSPIN_WAVERT_BRIDGE (1) — Bridge from Capture Topology
+    // KSPIN_WAVERT_BRIDGE (1) - Bridge from Capture Topology
     {
         0, 0, 0,
         NULL,
@@ -771,7 +771,7 @@ CMiniportWaveRTStreamHvAudio::GetPosition(
 }
 
 // ============================================================================
-// SetState — Transitions WaveRT Stream & Notifies Host on KSSTATE_RUN
+// SetState - Transitions WaveRT Stream & Notifies Host on KSSTATE_RUN
 // ============================================================================
 STDMETHODIMP
 CMiniportWaveRTStreamHvAudio::SetState(

@@ -1,6 +1,6 @@
 // ============================================================================
-// AudioCommon.h — Shared PortCls/WaveRT Definitions & Ring Buffer Structures
-// Project: VMStream — Guest Virtual Audio Driver (HvVirtualAudio.sys)
+// AudioCommon.h - Shared PortCls/WaveRT Definitions & Ring Buffer Structures
+// Project: VMStream - Guest Virtual Audio Driver (HvVirtualAudio.sys)
 // ============================================================================
 #pragma once
 
@@ -152,7 +152,7 @@ private:
 };
 
 // ============================================================================
-// IHvAudioAdapterCommon — Adapter-level state shared across miniports & IOCTLs
+// IHvAudioAdapterCommon - Adapter-level state shared across miniports & IOCTLs
 // ============================================================================
 DECLARE_INTERFACE_(IHvAudioAdapterCommon, IUnknown) {
     STDMETHOD_(NTSTATUS, Init)(THIS_ _In_ PDEVICE_OBJECT DeviceObject) PURE;

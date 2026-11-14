@@ -1,6 +1,6 @@
 // ============================================================================
-// AudioBridgeWorker.h — Guest Bidirectional Audio & KSSTATE_RUN Gate Bridge
-// Project: VMStream — Guest Service Bridge (HvGuestBridge.exe)
+// AudioBridgeWorker.h - Guest Bidirectional Audio & KSSTATE_RUN Gate Bridge
+// Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
 #pragma once
 

@@ -1,6 +1,6 @@
 // ============================================================================
-// WaveRTMiniport.h — PortCls WaveRT Miniport & Stream Declarations
-// Project: VMStream — Guest Virtual Audio Driver (HvVirtualAudio.sys)
+// WaveRTMiniport.h - PortCls WaveRT Miniport & Stream Declarations
+// Project: VMStream - Guest Virtual Audio Driver (HvVirtualAudio.sys)
 // ============================================================================
 #pragma once
 
@@ -9,7 +9,7 @@
 class CMiniportWaveRTHvAudio;
 
 // ============================================================================
-// CMiniportWaveRTStreamHvAudio — WaveRT Stream with Notification Support
+// CMiniportWaveRTStreamHvAudio - WaveRT Stream with Notification Support
 // ============================================================================
 class CMiniportWaveRTStreamHvAudio :
     public IMiniportWaveRTStreamNotification,
@@ -122,7 +122,7 @@ private:
 };
 
 // ============================================================================
-// CMiniportWaveRTHvAudio — WaveRT Miniport Filter
+// CMiniportWaveRTHvAudio - WaveRT Miniport Filter
 // ============================================================================
 class CMiniportWaveRTHvAudio :
     public IMiniportWaveRT,

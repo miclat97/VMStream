@@ -1,6 +1,6 @@
 // ============================================================================
-// Driver.cpp — KMDF + Virtual HID Framework (VHF) Multi-Touch Digitizer Driver
-// Project: VMStream — HvTouchHid.sys
+// Driver.cpp - KMDF + Virtual HID Framework (VHF) Multi-Touch Digitizer Driver
+// Project: VMStream - HvTouchHid.sys
 // ============================================================================
 #include "Driver.h"
 #include <wdmsec.h>
@@ -15,7 +15,7 @@ static KSPIN_LOCK g_ControlDeviceLock;
 #endif
 
 // ============================================================================
-// DriverEntry — Initializes KMDF Driver Object
+// DriverEntry - Initializes KMDF Driver Object
 // ============================================================================
 extern "C"
 NTSTATUS
@@ -41,7 +41,7 @@ DriverEntry(
 }
 
 // ============================================================================
-// HvTouchEvtDriverDeviceAdd — Attaches LowerFilter to mshidkmdf & initializes VHF
+// HvTouchEvtDriverDeviceAdd - Attaches LowerFilter to mshidkmdf & initializes VHF
 // ============================================================================
 NTSTATUS
 HvTouchEvtDriverDeviceAdd(
@@ -126,7 +126,7 @@ HvTouchEvtDriverDeviceAdd(
 }
 
 // ============================================================================
-// HvTouchCreateControlDevice — Creates \\.\HvTouchHid sideband IOCTL endpoint
+// HvTouchCreateControlDevice - Creates \\.\HvTouchHid sideband IOCTL endpoint
 // ============================================================================
 NTSTATUS
 HvTouchCreateControlDevice(
@@ -213,7 +213,7 @@ HvTouchDeleteControlDevice(
 }
 
 // ============================================================================
-// HvTouchEvtDeviceSelfManagedIoInit / Cleanup — Starts & Deletes VHF
+// HvTouchEvtDeviceSelfManagedIoInit / Cleanup - Starts & Deletes VHF
 // ============================================================================
 NTSTATUS
 HvTouchEvtDeviceSelfManagedIoInit(
@@ -266,7 +266,7 @@ HvTouchEvtDeviceContextCleanup(
 }
 
 // ============================================================================
-// EvtVhfAsyncOperationGetFeature — Handles Report ID 0x02 & 0x03 Feature Queries
+// EvtVhfAsyncOperationGetFeature - Handles Report ID 0x02 & 0x03 Feature Queries
 // Without handling both 0x02 (Max Contacts = 10) and 0x03 (THQA Certification),
 // Windows 11 hidclass.sys / win32kbase.sys disables multi-touch digitizer mode.
 // ============================================================================
@@ -308,7 +308,7 @@ EvtVhfAsyncOperationGetFeature(
 }
 
 // ============================================================================
-// HvTouchSubmitInputReport — Sanitizes and submits 64-byte HID Input Report
+// HvTouchSubmitInputReport - Sanitizes and submits 64-byte HID Input Report
 // ============================================================================
 NTSTATUS
 HvTouchSubmitInputReport(
@@ -357,7 +357,7 @@ HvTouchSubmitInputReport(
 }
 
 // ============================================================================
-// HvTouchResetAllContacts — Releases all touch contacts (TipSwitch = 0)
+// HvTouchResetAllContacts - Releases all touch contacts (TipSwitch = 0)
 // ============================================================================
 NTSTATUS
 HvTouchResetAllContacts(
@@ -389,7 +389,7 @@ HvTouchResetAllContacts(
 }
 
 // ============================================================================
-// HvTouchEvtIoDeviceControl — Dispatches IOCTL_HVTOUCH_SUBMIT_FRAME / RESET
+// HvTouchEvtIoDeviceControl - Dispatches IOCTL_HVTOUCH_SUBMIT_FRAME / RESET
 // ============================================================================
 VOID
 HvTouchEvtIoDeviceControl(

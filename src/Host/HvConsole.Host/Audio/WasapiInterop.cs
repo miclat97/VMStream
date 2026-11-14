@@ -1,5 +1,5 @@
 // ============================================================================
-// WasapiInterop.cs — Native Windows Core Audio (WASAPI) COM Interop
+// WasapiInterop.cs - Native Windows Core Audio (WASAPI) COM Interop
 // Provides direct access to IMMDeviceEnumerator, IAudioClient,
 // IAudioRenderClient, and IAudioCaptureClient with deterministic COM release
 // so the Host Microphone handle is 100% closed when muted/disarmed.

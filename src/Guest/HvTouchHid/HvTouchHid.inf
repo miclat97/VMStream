@@ -1,12 +1,12 @@
 ; ============================================================================
 ; HvTouchHid.inf - WDK Installation File for VMStream Virtual Multi-Touch HID
-; Uses built-in mshidkmdf.sys as Function Driver and HvTouchHid.sys (VHF) as LowerFilter
+; Uses HvTouchHid.sys as Function Driver and in-box vhf.sys as LowerFilter
 ; ============================================================================
 
 [Version]
 Signature   = "$WINDOWS NT$"
-Class       = HIDClass
-ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
 Provider    = %ManufacturerName%
 CatalogFile = HvTouchHid.cat
 DriverVer   = 11/14/2026,1.0.0.0
@@ -45,23 +45,15 @@ HvTouchHid.sys
 AddReg = HvTouchHid_Device.NT.AddReg
 
 [HvTouchHid_Device.NT.AddReg]
-; Register HvTouchHid.sys as a LowerFilter beneath the in-box mshidkmdf.sys function driver
-HKR,,"LowerFilters",0x00010000,"HvTouchHid"
+; Register in-box vhf.sys (Virtual HID Framework) as LowerFilter beneath HvTouchHid.sys
+HKR,,"LowerFilters",0x00010000,"vhf"
 
 ; ============================================================================
 ; Service Installation Section
 ; ============================================================================
 
 [HvTouchHid_Device.NT.Services]
-; mshidkmdf is the in-box Windows HID-KMDF pass-through function driver (SPSVCINST_ASSOCSERVICE = 0x00000002)
-AddService = mshidkmdf, 0x00000002, mshidkmdf_Service_Inst
-AddService = HvTouchHid,, HvTouchHid_Service_Inst
-
-[mshidkmdf_Service_Inst]
-ServiceType   = 1                  ; SERVICE_KERNEL_DRIVER
-StartType     = 3                  ; SERVICE_DEMAND_START
-ErrorControl  = 1                  ; SERVICE_ERROR_NORMAL
-ServiceBinary = %12%\mshidkmdf.sys
+AddService = HvTouchHid, %SPSVCINST_ASSOCSERVICE%, HvTouchHid_Service_Inst
 
 [HvTouchHid_Service_Inst]
 DisplayName   = %HvTouchHid.SvcDesc%
@@ -81,4 +73,5 @@ SPSVCINST_ASSOCSERVICE = 0x00000002
 ManufacturerName       = "VMStream Project"
 DiskName               = "VMStream Multi-Touch Digitizer Installation Disk"
 HvTouchHid.DeviceDesc  = "Hyper-V Console Multi-Touch Digitizer (VHF)"
-HvTouchHid.SvcDesc     = "Hyper-V Console Multi-Touch VHF Filter Driver"
+HvTouchHid.SvcDesc     = "Hyper-V Console Multi-Touch VHF Driver"
+

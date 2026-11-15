@@ -192,6 +192,7 @@ function Find-VsToolchain {
     $vcToolsRoot = Join-Path $installPath "VC\Tools\MSVC"
     $clExe = $null
     $linkExe = $null
+    $msvcRoot = $null
     if (Test-Path $vcToolsRoot) {
         $latestMsvc = Get-ChildItem -Path $vcToolsRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
         if ($latestMsvc) {
@@ -200,6 +201,7 @@ function Find-VsToolchain {
             if (Test-Path $clCandidate) {
                 $clExe = $clCandidate
                 $linkExe = $linkCandidate
+                $msvcRoot = $latestMsvc.FullName
             }
         }
     }
@@ -209,7 +211,7 @@ function Find-VsToolchain {
         MsBuildExe  = if (Test-Path $msbuild) { $msbuild } else { $null }
         ClExe       = $clExe
         LinkExe     = $linkExe
-        MsvcRoot    = if ($clExe) { Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $clExe)) } else { $null }
+        MsvcRoot    = $msvcRoot
     }
 }
 
@@ -328,14 +330,13 @@ if (-not $SkipWdk) {
             $libRoot = Join-Path $root "Lib"
             if (-not (Test-Path $incRoot) -or -not (Test-Path $libRoot)) { continue }
 
-            # Find version directory containing km\ntddk.h, km\vhf.h, and km\portcls.h
+            # In WDK, ntddk.h and portcls.h are in Include\<ver>\km, while vhf.h and hidport.h are in Include\<ver>\shared
             $incVerDir = Get-ChildItem -Path $incRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
                 (Test-Path (Join-Path $_.FullName "km\ntddk.h")) -and
-                (Test-Path (Join-Path $_.FullName "km\vhf.h")) -and
-                (Test-Path (Join-Path $_.FullName "km\portcls.h"))
+                (Test-Path (Join-Path $_.FullName "km\portcls.h")) -and
+                ((Test-Path (Join-Path $_.FullName "shared\vhf.h")) -or (Test-Path (Join-Path $_.FullName "km\vhf.h")))
             } | Sort-Object Name -Descending | Select-Object -First 1
 
-            # Also check if shared\hidport.h is in this root or in SystemKitsRoot
             if (-not $incVerDir) { continue }
 
             $libVerDir = Get-ChildItem -Path $libRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
@@ -346,7 +347,7 @@ if (-not $SkipWdk) {
 
             if (-not $libVerDir) { continue }
 
-            # Locate KMDF headers (wdf.h) and libraries (WdfDriverEntry.lib) - prefer 1.31 if present for broad Win10/11 compatibility, else latest
+            # Locate KMDF headers (wdf.h) and libraries (WdfDriverEntry.lib) - prefer 1.31 if present, else latest matching version
             $kmdfIncRoot = Join-Path $incRoot "wdf\kmdf"
             $kmdfLibRoot = Join-Path $libRoot "wdf\kmdf\x64"
             if (-not (Test-Path $kmdfIncRoot) -or -not (Test-Path $kmdfLibRoot)) { continue }
@@ -354,7 +355,8 @@ if (-not $SkipWdk) {
             $kmdfVer = "1.31"
             if (-not (Test-Path (Join-Path $kmdfIncRoot "1.31\wdf.h")) -or -not (Test-Path (Join-Path $kmdfLibRoot "1.31\WdfDriverEntry.lib"))) {
                 $latestKmdfDir = Get-ChildItem -Path $kmdfIncRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
-                    Test-Path (Join-Path $_.FullName "wdf.h")
+                    (Test-Path (Join-Path $_.FullName "wdf.h")) -and
+                    (Test-Path (Join-Path $kmdfLibRoot "$($_.Name)\WdfDriverEntry.lib"))
                 } | Sort-Object Name -Descending | Select-Object -First 1
                 if ($latestKmdfDir) {
                     $kmdfVer = $latestKmdfDir.Name
@@ -363,15 +365,8 @@ if (-not $SkipWdk) {
                 }
             }
 
-            # Locate shared headers (hidport.h, ks.h, ksmedia.h, ntdef.h)
+            # Keep WDK shared directory pointing to $incVerDir\shared (which contains vhf.h and hidport.h)
             $sharedIncDir = Join-Path $incVerDir.FullName "shared"
-            if (-not (Test-Path (Join-Path $sharedIncDir "ntdef.h"))) {
-                # Fallback to SystemKitsRoot shared if needed
-                $sysShared = Join-Path $SystemKitsRoot "Include\$SdkVersion\shared"
-                if (Test-Path (Join-Path $sysShared "ntdef.h")) {
-                    $sharedIncDir = $sysShared
-                }
-            }
 
             return [PSCustomObject]@{
                 WdkRoot       = $root
@@ -416,14 +411,6 @@ if (-not $SkipWdk) {
             }
             Write-Host "      -> Extracting $($pkg.Name) into '$LocalWdkKitRoot'..." -ForegroundColor Cyan
             Extract-NuGetPackageContent -NupkgFile $pkg.File -TargetRoot $LocalWdkKitRoot
-        }
-
-        # Also copy into SystemKitsRoot if running as Administrator and SystemKitsRoot lacks km\ntddk.h
-        if (Test-IsAdmin -and (Test-Path $SystemKitsRoot)) {
-            try {
-                Copy-Item -Path "$LocalWdkKitRoot\Include\*" -Destination (Join-Path $SystemKitsRoot "Include") -Recurse -Force -ErrorAction SilentlyContinue
-                Copy-Item -Path "$LocalWdkKitRoot\Lib\*"     -Destination (Join-Path $SystemKitsRoot "Lib")     -Recurse -Force -ErrorAction SilentlyContinue
-            } catch { }
         }
 
         $WdkLayout = Find-WdkLayout

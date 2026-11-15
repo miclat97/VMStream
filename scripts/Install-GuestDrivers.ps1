@@ -21,6 +21,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# If invoked directly from scripts\ instead of build\dist\Guest\, automatically locate build\dist\Guest
+if (-not (Get-ChildItem -Path $PackageDir -Recurse -Filter "HvGuestBridge.exe" -ErrorAction SilentlyContinue)) {
+    $distGuestCandidate = Join-Path (Split-Path -Parent $PSScriptRoot) "build\dist\Guest"
+    if (Test-Path $distGuestCandidate) {
+        $PackageDir = $distGuestCandidate
+    }
+}
+
 # Verify Administrator privileges inside Guest VM
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -30,6 +38,7 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host " VMStream Guest Installer (HvTouchHid + HvVirtualAudio + HvGuestBridge)" -ForegroundColor Cyan
+Write-Host " Package Directory: $PackageDir"                                        -ForegroundColor Cyan
 Write-Host "======================================================================" -ForegroundColor Cyan
 
 # ----------------------------------------------------------------------------

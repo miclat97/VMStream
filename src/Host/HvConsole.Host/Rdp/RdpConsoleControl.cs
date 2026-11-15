@@ -77,6 +77,13 @@ public interface IMsRdpExtendedSettings
     int get_Property([MarshalAs(UnmanagedType.BStr)] string bstrPropertyName, [Out] out object pValue);
 }
 
+[StructLayout(LayoutKind.Sequential)]
+public struct RemotableHandle
+{
+    public int fContext;
+    public int hInproc;
+}
+
 /// <summary>
 /// Direct COM interface for IMsRdpClientNonScriptable3 ({B3378D90-0728-45C7-8ED7-B6159FB92219})
 /// </summary>
@@ -97,8 +104,8 @@ public interface IMsRdpClientNonScriptable3
     void ResetPassword();
     void NotifyRedirectDeviceChange(IntPtr wParam, IntPtr lParam);
     void SendKeys(int numKeys, ref bool pbArrayKeyUp, ref int plKeyData);
-    void put_UIParentWindowHandle(IntPtr hwndUIParentWindowHandle);
-    IntPtr get_UIParentWindowHandle();
+    void put_UIParentWindowHandle(ref RemotableHandle hwndUIParentWindowHandle);
+    void get_UIParentWindowHandle(out IntPtr phwndUIParentWindowHandle);
     void put_ShowRedirectionWarningDialog([MarshalAs(UnmanagedType.VariantBool)] bool fShowRdrDlg);
     [return: MarshalAs(UnmanagedType.VariantBool)] bool get_ShowRedirectionWarningDialog();
     void put_PromptForCredentials([MarshalAs(UnmanagedType.VariantBool)] bool fPrompt);
@@ -115,12 +122,18 @@ public interface IMsRdpClientNonScriptable3
 [DesignerCategory("Code")]
 public sealed class RdpConsoleControl : AxHost
 {
+    // MsRdpClient9NotSafeForScripting:  {8B918B82-7985-4C24-89DF-C33AD2BBFBCD} (preferred by VMConnect)
     // MsRdpClient10NotSafeForScripting: {A0C63C30-F08D-4AB4-907C-34905D770C7D}
-    // MsRdpClient9NotSafeForScripting:  {8B918B82-7985-4C24-89DF-C33AD2BBFBCD}
     // MsRdpClient8NotSafeForScripting:  {A3BC03A0-041D-42E3-AD22-882B7865C9C5}
-    private const string ClsidMsRdpClient10NotSafe = "a0c63c30-f08d-4ab4-907c-34905d770c7d";
     private const string ClsidMsRdpClient9NotSafe  = "8b918b82-7985-4c24-89df-c33ad2bbfbcd";
+    private const string ClsidMsRdpClient10NotSafe = "a0c63c30-f08d-4ab4-907c-34905d770c7d";
     private const string ClsidMsRdpClient8NotSafe  = "a3bc03a0-041d-42e3-ad22-882b7865c9c5";
+
+    private const uint GA_ROOT = 2;
+    private const int WDT_INPROC_CALL = 0x48746457;
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
 
     private object? _ocx;
     private ConnectionPointCookie? _eventCookie;
@@ -142,13 +155,13 @@ public sealed class RdpConsoleControl : AxHost
 
     private static string SelectAvailableRdpClsid()
     {
-        if (Type.GetTypeFromCLSID(new Guid(ClsidMsRdpClient10NotSafe)) != null)
-        {
-            return ClsidMsRdpClient10NotSafe;
-        }
         if (Type.GetTypeFromCLSID(new Guid(ClsidMsRdpClient9NotSafe)) != null)
         {
             return ClsidMsRdpClient9NotSafe;
+        }
+        if (Type.GetTypeFromCLSID(new Guid(ClsidMsRdpClient10NotSafe)) != null)
+        {
+            return ClsidMsRdpClient10NotSafe;
         }
         return ClsidMsRdpClient8NotSafe;
     }
@@ -191,7 +204,7 @@ public sealed class RdpConsoleControl : AxHost
 
     /// <summary>
     /// Connects strictly to the Hyper-V Virtual Machine Console (raw synthetic framebuffer + GPU-PV)
-    /// on localhost:2179 using the current Windows Admin / Windows Hello CredSSP token.
+    /// on localhost:2179 using the current Windows Admin / Windows Hello CredSSP token without credential delegation.
     /// </summary>
     public void ConnectToHyperVConsole(Guid vmGuid)
     {
@@ -206,60 +219,93 @@ public sealed class RdpConsoleControl : AxHost
             throw new InvalidOperationException("Underlying mstscax.dll ActiveX control is not initialized.");
         }
 
+        EnsureLocalCredSspPolicyDefaults();
+
         // CRITICAL:
-        // 1) PCB must be a clean 36-char GUID string WITHOUT curly braces ("d8a3f120-...").
-        //    Passing "{d8a3f120-...}" causes vmms.exe on port 2179 to reject with 0x80070057.
+        // 1) PCB must be a clean 36-char uppercase GUID string WITHOUT curly braces ("D8A3F120-...").
+        //    Passing "{D8A3F120-...}" causes vmms.exe on port 2179 to reject with 0x80070057.
         // 2) Do NOT append ";EnhancedMode=1" to PCB. A clean GUID without ";EnhancedMode=1"
         //    instructs vmms.exe on port 2179 to open a strict Basic Console Session
         //    (synthetic framebuffer / GPU-PV) rather than an Enhanced Session.
-        string cleanPcbGuid = vmGuid.ToString("D");
+        string cleanPcbGuid = vmGuid.ToString("D").ToUpperInvariant();
 
         SetComProperty(_ocx, "Server", "localhost");
         SetComProperty(_ocx, "ColorDepth", 32);
 
-        // Configure all available AdvancedSettings interfaces (IMsRdpClientAdvancedSettings6..8).
-        // NOTE: "PCB", "AuthenticationServiceClass", and "EnableCredSspSupport" are defined on
-        // IMsRdpClientAdvancedSettings6 (exposed via AdvancedSettings7, AdvancedSettings8, AdvancedSettings9),
-        // NOT on IMsRdpExtendedSettings (which returns 0x8000FFFF E_UNEXPECTED for "PCB").
-        object?[] advCandidates =
+        // Set UIParentWindowHandle via wireHWND (RemotableHandle with WDT_INPROC_CALL = 0x48746457)
+        if (_ocx is IMsRdpClientNonScriptable3 nonScriptableParent)
         {
-            GetComProperty(_ocx, "AdvancedSettings9"),
-            GetComProperty(_ocx, "AdvancedSettings8"),
-            GetComProperty(_ocx, "AdvancedSettings7"),
-            GetComProperty(_ocx, "AdvancedSettings6"),
-            GetComProperty(_ocx, "AdvancedSettings2"),
-            GetComProperty(_ocx, "AdvancedSettings")
-        };
-
-        object? primaryAdv = null;
-        foreach (object? candidate in advCandidates)
-        {
-            if (candidate != null)
+            try
             {
-                primaryAdv ??= candidate;
-                SetComProperty(candidate, "PCB", cleanPcbGuid);
+                IntPtr rootHwnd = GetAncestor(Handle, GA_ROOT);
+                if (rootHwnd == IntPtr.Zero) rootHwnd = Handle;
+                var wireHwnd = new RemotableHandle
+                {
+                    fContext = WDT_INPROC_CALL,
+                    hInproc = rootHwnd.ToInt32()
+                };
+                nonScriptableParent.put_UIParentWindowHandle(ref wireHwnd);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[RdpConsoleControl] put_UIParentWindowHandle ignored: {ex.Message}");
             }
         }
+
+        object? primaryAdv =
+            GetComProperty(_ocx, "AdvancedSettings9") ??
+            GetComProperty(_ocx, "AdvancedSettings8") ??
+            GetComProperty(_ocx, "AdvancedSettings7") ??
+            GetComProperty(_ocx, "AdvancedSettings6") ??
+            GetComProperty(_ocx, "AdvancedSettings2") ??
+            GetComProperty(_ocx, "AdvancedSettings");
 
         if (primaryAdv != null)
         {
             // Port 2179 is the Hyper-V Virtual Machine Management Service (VMMS) console endpoint
             SetComProperty(primaryAdv, "RDPPort", 2179);
-            SetComProperty(primaryAdv, "PCB", cleanPcbGuid);
+            SetComProperty(primaryAdv, "AuthenticationLevel", 0u);
             SetComProperty(primaryAdv, "AuthenticationServiceClass", "Microsoft Virtual Console Service");
-            SetComProperty(primaryAdv, "AuthenticationLevel", 0);
-            SetComProperty(primaryAdv, "EnableCredSspSupport", true);
+        }
 
+        // CRITICAL ORDER (matches official VMConnect & ExHyperV):
+        // EnableCredSspSupport(true) and NegotiateSecurityLayer(false) MUST be called on the SAME
+        // IMsRdpClientNonScriptable3 interface, and EnableCredSspSupport(true) MUST be set FIRST
+        // before NegotiateSecurityLayer(false). Calling them in reverse order or across AdvancedSettings
+        // causes NegotiateSecurityLayer(false) to fail with E_INVALIDARG!
+        if (_ocx is IMsRdpClientNonScriptable3 nonScriptable)
+        {
+            try { nonScriptable.put_EnableCredSspSupport(true); } catch { }
+            try { nonScriptable.put_NegotiateSecurityLayer(false); } catch { }
+        }
+
+        // CRITICAL FOR HYPER-V CONSOLE AUTHENTICATION (avoids RDP error 3848 / password prompt):
+        // Set "DisableCredentialsDelegation" = true via IMsRdpExtendedSettings.
+        // Without this, CredSSP attempts to delegate credentials to vmms.exe (which uses a self-signed
+        // NTLM-only certificate), prompting for localhost credentials and failing with:
+        // "Your system administrator does not allow you to connect to this remote computer."
+        if (_ocx is IMsRdpExtendedSettings extSettings)
+        {
+            TrySetExtendedProperty(extSettings, "DisableCredentialsDelegation", true);
+            TrySetExtendedProperty(extSettings, "DesktopScaleFactor", 100u);
+            TrySetExtendedProperty(extSettings, "DeviceScaleFactor", 100u);
+        }
+
+        if (primaryAdv != null)
+        {
             // Distraction-Free Fullscreen: disable the top blue RDP connection bar
             SetComProperty(primaryAdv, "DisplayConnectionBar", false);
             SetComProperty(primaryAdv, "ConnectionBarShowMinimizeButton", false);
             SetComProperty(primaryAdv, "ConnectionBarShowRestoreButton", false);
             SetComProperty(primaryAdv, "ConnectionBarShowPinButton", false);
+            SetComProperty(primaryAdv, "ContainerHandledFullScreen", 1);
 
-            // Enable dynamic viewport scaling & lowest input dispatch interval
+            // Enable dynamic viewport scaling, disable VMBus network probing, & lowest input interval
             SetComProperty(primaryAdv, "SmartSizing", true);
+            SetComProperty(primaryAdv, "EnableAutoReconnect", true);
+            SetComProperty(primaryAdv, "BandwidthDetection", false);
             SetComProperty(primaryAdv, "minInputSendInterval", 1);
-            SetComProperty(primaryAdv, "PerformanceFlags", 0);
+            SetComProperty(primaryAdv, "PerformanceFlags", 0x80); // TS_PERF_ENABLE_FONT_SMOOTHING
             SetComProperty(primaryAdv, "GrabFocusOnConnect", true);
 
             // Disable RDP audio/drive redirection since VMStream uses AF_HYPERV WaveRT audio
@@ -268,32 +314,47 @@ public sealed class RdpConsoleControl : AxHost
             SetComProperty(primaryAdv, "RedirectDrives", false);
             SetComProperty(primaryAdv, "RedirectPrinters", false);
             SetComProperty(primaryAdv, "RedirectSmartCards", false);
-        }
 
-        // Configure NonScriptable interface for NegotiateSecurityLayer & CredSSP
-        if (_ocx is IMsRdpClientNonScriptable3 nonScriptable)
-        {
-            try { nonScriptable.put_UIParentWindowHandle(Handle); } catch { }
-            try { nonScriptable.put_NegotiateSecurityLayer(false); } catch { }
-            try { nonScriptable.put_EnableCredSspSupport(true); } catch { }
-            try { nonScriptable.put_PromptForCredentials(false); } catch { }
-            try { nonScriptable.put_ShowRedirectionWarningDialog(false); } catch { }
-        }
-
-        // Configure optional IMsRdpExtendedSettings hints (never throw if unsupported by OS build):
-        // - EnableHardwareMode: hardware-accelerated decoding
-        // - EnableFrameBufferRedirection: zero-copy local loopback framebuffer sharing
-        // - DisableTouchRemoting: prevent RDP touch remoting from interfering with AF_HYPERV VHF touch
-        if (_ocx is IMsRdpExtendedSettings extSettings)
-        {
-            TrySetExtendedProperty(extSettings, "EnableHardwareMode", true);
-            TrySetExtendedProperty(extSettings, "EnableFrameBufferRedirection", true);
-            TrySetExtendedProperty(extSettings, "DisableTouchRemoting", true);
-            TrySetExtendedProperty(extSettings, "DisableEnhancedMode", true);
+            // Set Pre-Connection Blob (PCB) to the clean uppercase VM GUID right before Connect()
+            SetComProperty(primaryAdv, "PCB", cleanPcbGuid);
         }
 
         // Initiate connection to localhost:2179
         InvokeComMethod(_ocx, "Connect");
+    }
+
+    private static void EnsureLocalCredSspPolicyDefaults()
+    {
+        try
+        {
+            string[] subKeys =
+            {
+                "AllowDefaultCredentials",
+                "AllowDefaultCredentialsDomain",
+                "AllowDefaultCredentialsWhenNTLMOnly",
+                "AllowDefaultCredentialsWhenNTLMOnlyDomain",
+                "AllowFreshCredentials",
+                "AllowFreshCredentialsDomain",
+                "AllowFreshCredentialsWhenNTLMOnly",
+                "AllowFreshCredentialsWhenNTLMOnlyDomain",
+                "AllowSavedCredentials",
+                "AllowSavedCredentialsDomain",
+                "AllowSavedCredentialsWhenNTLMOnly",
+                "AllowSavedCredentialsWhenNTLMOnlyDomain"
+            };
+
+            const string basePath = @"SYSTEM\CurrentControlSet\Control\Lsa\Credssp\PolicyDefaults";
+            foreach (string sub in subKeys)
+            {
+                using var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey($@"{basePath}\{sub}", writable: true);
+                key?.SetValue("Hyper-V", "Microsoft Virtual Console Service/*", Microsoft.Win32.RegistryValueKind.String);
+                key?.SetValue("Hyper-V-Local", "Microsoft Virtual Console Service/localhost", Microsoft.Win32.RegistryValueKind.String);
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RdpConsoleControl] EnsureLocalCredSspPolicyDefaults ignored: {ex.Message}");
+        }
     }
 
     private static void TrySetExtendedProperty(IMsRdpExtendedSettings extSettings, string name, object value)

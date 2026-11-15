@@ -15,7 +15,7 @@
     <RootNamespace>HvConsole.Host</RootNamespace>
     <AssemblyName>HvConsole.Host</AssemblyName>
     <Version>1.0.0</Version>
-    <Description>VMStream — Zero-Artifact Hyper-V Console Client with HVSocket Audio &amp; Multi-Touch HID Bridge</Description>
+    <Description>VMStream - Zero-Artifact Hyper-V Console Client with HVSocket Audio &amp; Multi-Touch HID Bridge</Description>
   </PropertyGroup>
 
   <ItemGroup>

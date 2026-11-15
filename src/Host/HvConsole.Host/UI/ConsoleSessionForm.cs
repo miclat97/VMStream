@@ -158,15 +158,23 @@ public sealed class ConsoleSessionForm : Form
             SetBorderlessFullscreen(true);
         }
 
-        try
+        if (!_rdpControl.IsHandleCreated)
         {
-            _rdpControl.ConnectToHyperVConsole(_vmInfo.VmId);
+            _rdpControl.CreateControl();
         }
-        catch (Exception ex)
+
+        BeginInvoke(() =>
         {
-            _lblBannerMessage.ForeColor = Color.FromArgb(248, 113, 113);
-            _lblBannerMessage.Text = $"Console connection failed: {ex.Message}";
-        }
+            try
+            {
+                _rdpControl.ConnectToHyperVConsole(_vmInfo.VmId);
+            }
+            catch (Exception ex)
+            {
+                _lblBannerMessage.ForeColor = Color.FromArgb(248, 113, 113);
+                _lblBannerMessage.Text = $"Console connection failed: {ex.Message}";
+            }
+        });
     }
 
     private void OnRdpConnecting()

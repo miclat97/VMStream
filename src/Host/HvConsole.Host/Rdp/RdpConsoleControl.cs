@@ -116,9 +116,11 @@ public interface IMsRdpClientNonScriptable3
 public sealed class RdpConsoleControl : AxHost
 {
     // MsRdpClient10NotSafeForScripting: {A0C63C30-F08D-4AB4-907C-34905D770C7D}
-    // MsRdpClient9NotSafeForScripting:  {7390F3D8-0439-4C05-91E3-CF5CB290C3D0}
+    // MsRdpClient9NotSafeForScripting:  {8B918B82-7985-4C24-89DF-C33AD2BBFBCD}
+    // MsRdpClient8NotSafeForScripting:  {A3BC03A0-041D-42E3-AD22-882B7865C9C5}
     private const string ClsidMsRdpClient10NotSafe = "a0c63c30-f08d-4ab4-907c-34905d770c7d";
-    private const string ClsidMsRdpClient9NotSafe  = "7390f3d8-0439-4c05-91e3-cf5cb290c3d0";
+    private const string ClsidMsRdpClient9NotSafe  = "8b918b82-7985-4c24-89df-c33ad2bbfbcd";
+    private const string ClsidMsRdpClient8NotSafe  = "a3bc03a0-041d-42e3-ad22-882b7865c9c5";
 
     private object? _ocx;
     private ConnectionPointCookie? _eventCookie;
@@ -144,7 +146,11 @@ public sealed class RdpConsoleControl : AxHost
         {
             return ClsidMsRdpClient10NotSafe;
         }
-        return ClsidMsRdpClient9NotSafe;
+        if (Type.GetTypeFromCLSID(new Guid(ClsidMsRdpClient9NotSafe)) != null)
+        {
+            return ClsidMsRdpClient9NotSafe;
+        }
+        return ClsidMsRdpClient8NotSafe;
     }
 
     protected override void AttachInterfaces()
@@ -156,6 +162,7 @@ public sealed class RdpConsoleControl : AxHost
     protected override void CreateSink()
     {
         base.CreateSink();
+        _ocx ??= GetOcx();
         if (_ocx != null)
         {
             try
@@ -188,88 +195,118 @@ public sealed class RdpConsoleControl : AxHost
     /// </summary>
     public void ConnectToHyperVConsole(Guid vmGuid)
     {
+        if (!IsHandleCreated)
+        {
+            CreateControl();
+        }
+
+        _ocx ??= GetOcx();
         if (_ocx == null)
         {
             throw new InvalidOperationException("Underlying mstscax.dll ActiveX control is not initialized.");
         }
 
-        // CRITICAL: PCB must be a clean GUID string WITHOUT curly braces ("d8a3f120-...").
-        // Passing "{d8a3f120-...}" causes vmms.exe on port 2179 to reject with 0x80070057.
-        string cleanPcbGuid = vmGuid.ToString("D").ToLowerInvariant();
+        // CRITICAL:
+        // 1) PCB must be a clean 36-char GUID string WITHOUT curly braces ("d8a3f120-...").
+        //    Passing "{d8a3f120-...}" causes vmms.exe on port 2179 to reject with 0x80070057.
+        // 2) Do NOT append ";EnhancedMode=1" to PCB. A clean GUID without ";EnhancedMode=1"
+        //    instructs vmms.exe on port 2179 to open a strict Basic Console Session
+        //    (synthetic framebuffer / GPU-PV) rather than an Enhanced Session.
+        string cleanPcbGuid = vmGuid.ToString("D");
 
         SetComProperty(_ocx, "Server", "localhost");
         SetComProperty(_ocx, "ColorDepth", 32);
 
-        object? advSettings = GetComProperty(_ocx, "AdvancedSettings9")
-                           ?? GetComProperty(_ocx, "AdvancedSettings8")
-                           ?? GetComProperty(_ocx, "AdvancedSettings7")
-                           ?? GetComProperty(_ocx, "AdvancedSettings2");
+        // Configure all available AdvancedSettings interfaces (IMsRdpClientAdvancedSettings6..8).
+        // NOTE: "PCB", "AuthenticationServiceClass", and "EnableCredSspSupport" are defined on
+        // IMsRdpClientAdvancedSettings6 (exposed via AdvancedSettings7, AdvancedSettings8, AdvancedSettings9),
+        // NOT on IMsRdpExtendedSettings (which returns 0x8000FFFF E_UNEXPECTED for "PCB").
+        object?[] advCandidates =
+        {
+            GetComProperty(_ocx, "AdvancedSettings9"),
+            GetComProperty(_ocx, "AdvancedSettings8"),
+            GetComProperty(_ocx, "AdvancedSettings7"),
+            GetComProperty(_ocx, "AdvancedSettings6"),
+            GetComProperty(_ocx, "AdvancedSettings2"),
+            GetComProperty(_ocx, "AdvancedSettings")
+        };
 
-        if (advSettings != null)
+        object? primaryAdv = null;
+        foreach (object? candidate in advCandidates)
+        {
+            if (candidate != null)
+            {
+                primaryAdv ??= candidate;
+                SetComProperty(candidate, "PCB", cleanPcbGuid);
+            }
+        }
+
+        if (primaryAdv != null)
         {
             // Port 2179 is the Hyper-V Virtual Machine Management Service (VMMS) console endpoint
-            SetComProperty(advSettings, "RDPPort", 2179);
-            SetComProperty(advSettings, "AuthenticationServiceClass", "Microsoft Virtual Console Service");
-            SetComProperty(advSettings, "AuthenticationLevel", 0);
-            SetComProperty(advSettings, "EnableCredSspSupport", true);
+            SetComProperty(primaryAdv, "RDPPort", 2179);
+            SetComProperty(primaryAdv, "PCB", cleanPcbGuid);
+            SetComProperty(primaryAdv, "AuthenticationServiceClass", "Microsoft Virtual Console Service");
+            SetComProperty(primaryAdv, "AuthenticationLevel", 0);
+            SetComProperty(primaryAdv, "EnableCredSspSupport", true);
 
             // Distraction-Free Fullscreen: disable the top blue RDP connection bar
-            SetComProperty(advSettings, "DisplayConnectionBar", false);
-            SetComProperty(advSettings, "ConnectionBarShowMinimizeButton", false);
-            SetComProperty(advSettings, "ConnectionBarShowRestoreButton", false);
-            SetComProperty(advSettings, "ConnectionBarShowPinButton", false);
+            SetComProperty(primaryAdv, "DisplayConnectionBar", false);
+            SetComProperty(primaryAdv, "ConnectionBarShowMinimizeButton", false);
+            SetComProperty(primaryAdv, "ConnectionBarShowRestoreButton", false);
+            SetComProperty(primaryAdv, "ConnectionBarShowPinButton", false);
 
             // Enable dynamic viewport scaling & lowest input dispatch interval
-            SetComProperty(advSettings, "SmartSizing", true);
-            SetComProperty(advSettings, "minInputSendInterval", 1);
-            SetComProperty(advSettings, "PerformanceFlags", 0);
-            SetComProperty(advSettings, "GrabFocusOnConnect", true);
+            SetComProperty(primaryAdv, "SmartSizing", true);
+            SetComProperty(primaryAdv, "minInputSendInterval", 1);
+            SetComProperty(primaryAdv, "PerformanceFlags", 0);
+            SetComProperty(primaryAdv, "GrabFocusOnConnect", true);
+
             // Disable RDP audio/drive redirection since VMStream uses AF_HYPERV WaveRT audio
-            SetComProperty(advSettings, "AudioRedirectionMode", 2); // 2 = Do not play via RDP
-            SetComProperty(advSettings, "AudioCaptureRedirectionMode", false);
+            SetComProperty(primaryAdv, "AudioRedirectionMode", 2); // 2 = Do not play via RDP
+            SetComProperty(primaryAdv, "AudioCaptureRedirectionMode", false);
+            SetComProperty(primaryAdv, "RedirectDrives", false);
+            SetComProperty(primaryAdv, "RedirectPrinters", false);
+            SetComProperty(primaryAdv, "RedirectSmartCards", false);
         }
 
         // Configure NonScriptable interface for NegotiateSecurityLayer & CredSSP
         if (_ocx is IMsRdpClientNonScriptable3 nonScriptable)
         {
-            try
-            {
-                nonScriptable.put_NegotiateSecurityLayer(true);
-                nonScriptable.put_EnableCredSspSupport(true);
-                nonScriptable.put_PromptForCredentials(false);
-                nonScriptable.put_ShowRedirectionWarningDialog(false);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[RdpConsoleControl] NonScriptable setup warning: {ex.Message}");
-            }
+            try { nonScriptable.put_UIParentWindowHandle(Handle); } catch { }
+            try { nonScriptable.put_NegotiateSecurityLayer(false); } catch { }
+            try { nonScriptable.put_EnableCredSspSupport(true); } catch { }
+            try { nonScriptable.put_PromptForCredentials(false); } catch { }
+            try { nonScriptable.put_ShowRedirectionWarningDialog(false); } catch { }
         }
 
-        // Configure ExtendedSettings: DisableEnhancedMode = true and PCB = "<VM_GUID>"
+        // Configure optional IMsRdpExtendedSettings hints (never throw if unsupported by OS build):
+        // - EnableHardwareMode: hardware-accelerated decoding
+        // - EnableFrameBufferRedirection: zero-copy local loopback framebuffer sharing
+        // - DisableTouchRemoting: prevent RDP touch remoting from interfering with AF_HYPERV VHF touch
         if (_ocx is IMsRdpExtendedSettings extSettings)
         {
-            object disableEnhanced = true;
-            extSettings.put_Property("DisableEnhancedMode", ref disableEnhanced);
-
-            object pcbValue = cleanPcbGuid;
-            int hr = extSettings.put_Property("PCB", ref pcbValue);
-            if (hr < 0)
-            {
-                Marshal.ThrowExceptionForHR(hr);
-            }
+            TrySetExtendedProperty(extSettings, "EnableHardwareMode", true);
+            TrySetExtendedProperty(extSettings, "EnableFrameBufferRedirection", true);
+            TrySetExtendedProperty(extSettings, "DisableTouchRemoting", true);
+            TrySetExtendedProperty(extSettings, "DisableEnhancedMode", true);
         }
-        else
-        {
-            // Fallback via IDispatch if QI for IMsRdpExtendedSettings uses a different IID
-            SetExtendedSettingFallback(_ocx, "DisableEnhancedMode", true);
-            SetExtendedSettingFallback(_ocx, "PCB", cleanPcbGuid);
-        }
-
-        // Also explicitly set EnhancedMode = false if exposed on the wrapper
-        SetComProperty(_ocx, "EnhancedMode", false);
 
         // Initiate connection to localhost:2179
         InvokeComMethod(_ocx, "Connect");
+    }
+
+    private static void TrySetExtendedProperty(IMsRdpExtendedSettings extSettings, string name, object value)
+    {
+        try
+        {
+            object boxed = value;
+            extSettings.put_Property(name, ref boxed);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RdpConsoleControl] TrySetExtendedProperty({name}) ignored: {ex.Message}");
+        }
     }
 
     public void DisconnectConsole()
@@ -279,6 +316,10 @@ public sealed class RdpConsoleControl : AxHost
         {
             object? connectedVal = GetComProperty(_ocx, "Connected");
             if (connectedVal is short s && s != 0)
+            {
+                InvokeComMethod(_ocx, "Disconnect");
+            }
+            else if (connectedVal is int i && i != 0)
             {
                 InvokeComMethod(_ocx, "Disconnect");
             }
@@ -329,6 +370,22 @@ public sealed class RdpConsoleControl : AxHost
                 target,
                 new[] { value }
             );
+            return;
+        }
+        catch
+        {
+            // Fallback to explicit DISPATCH_PROPERTYPUT if SetProperty failed
+        }
+
+        try
+        {
+            target.GetType().InvokeMember(
+                propertyName,
+                BindingFlags.PutDispProperty | BindingFlags.Public | BindingFlags.Instance,
+                null,
+                target,
+                new[] { value }
+            );
         }
         catch (Exception ex)
         {
@@ -336,29 +393,21 @@ public sealed class RdpConsoleControl : AxHost
         }
     }
 
-    private static void SetExtendedSettingFallback(object ocx, string name, object value)
+    private static void InvokeComMethod(object target, string methodName, params object[] args)
     {
         try
         {
-            ocx.GetType().InvokeMember(
-                "Property",
-                BindingFlags.SetProperty | BindingFlags.Public | BindingFlags.Instance,
+            target.GetType().InvokeMember(
+                methodName,
+                BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance,
                 null,
-                ocx,
-                new[] { name, value }
+                target,
+                args
             );
         }
-        catch { }
-    }
-
-    private static void InvokeComMethod(object target, string methodName, params object[] args)
-    {
-        target.GetType().InvokeMember(
-            methodName,
-            BindingFlags.InvokeMethod | BindingFlags.Public | BindingFlags.Instance,
-            null,
-            target,
-            args
-        );
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            throw tie.InnerException;
+        }
     }
 }

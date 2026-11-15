@@ -112,10 +112,12 @@ DEFINE_GUID(GUID_DEVINTERFACE_HVAUDIO,
     CTL_CODE(FILE_DEVICE_HVAUDIO, 0x813, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // ============================================================================
-// 3. Audio Constants (48 kHz, 16-bit/24-bit PCM, 10ms Period)
+// 3. Audio Constants (44.1 kHz & 48 kHz, 16-bit/24-bit PCM, 10ms Period)
 // ============================================================================
 
-#define HV_AUDIO_SAMPLE_RATE                48000
+#define HV_AUDIO_SAMPLE_RATE_44100          44100
+#define HV_AUDIO_SAMPLE_RATE_48000          48000
+#define HV_AUDIO_SAMPLE_RATE                HV_AUDIO_SAMPLE_RATE_48000
 #define HV_AUDIO_CHANNELS_STEREO            2
 #define HV_AUDIO_CHANNELS_MONO              1
 #define HV_AUDIO_BITS_PER_SAMPLE_16         16
@@ -123,9 +125,65 @@ DEFINE_GUID(GUID_DEVINTERFACE_HVAUDIO,
 #define HV_AUDIO_BYTES_PER_SAMPLE_16        2
 #define HV_AUDIO_BLOCK_ALIGN_STEREO_16      4
 #define HV_AUDIO_PERIOD_MS                  10
+#define HV_AUDIO_FRAMES_PER_PERIOD_44100    441     // 44100 Hz * 10 ms / 1000 = 441 frames
+#define HV_AUDIO_PERIOD_BYTES_STEREO_16_44100 1764  // 441 frames * 2 channels * 2 bytes = 1764 bytes
 #define HV_AUDIO_FRAMES_PER_PERIOD          480     // 48000 Hz * 10 ms / 1000 = 480 frames
 #define HV_AUDIO_PERIOD_BYTES_STEREO_16     1920    // 480 frames * 2 channels * 2 bytes = 1920 bytes
 #define HV_AUDIO_RING_BUFFER_SIZE           65536   // 64 KB circular buffer in kernel non-paged pool
+
+enum HV_AUDIO_RATE_CODE : uint8_t {
+    HvAudioRate_Default = 0, // Legacy / Default (48000 Hz)
+    HvAudioRate_44100   = 1, // 44100 Hz (CD Quality)
+    HvAudioRate_48000   = 2  // 48000 Hz (DVD/Studio Quality)
+};
+
+__inline uint8_t HvEncodeAudioRateCode(uint32_t sampleRate)
+{
+    if (sampleRate == HV_AUDIO_SAMPLE_RATE_44100) {
+        return HvAudioRate_44100;
+    }
+    if (sampleRate == HV_AUDIO_SAMPLE_RATE_48000) {
+        return HvAudioRate_48000;
+    }
+    return HvAudioRate_Default;
+}
+
+__inline uint32_t HvDecodeAudioRateCode(uint8_t code)
+{
+    return ((code & 0x0Fu) == HvAudioRate_44100)
+        ? HV_AUDIO_SAMPLE_RATE_44100
+        : HV_AUDIO_SAMPLE_RATE_48000;
+}
+
+__inline uint8_t HvPackAudioRateConfig(uint32_t renderOrPreferredRate, uint32_t captureRate)
+{
+    return static_cast<uint8_t>(
+        (HvEncodeAudioRateCode(renderOrPreferredRate) & 0x0Fu) |
+        ((HvEncodeAudioRateCode(captureRate) & 0x0Fu) << 4)
+    );
+}
+
+__inline uint32_t HvDecodeRenderRateFromConfig(uint8_t rateConfig)
+{
+    return HvDecodeAudioRateCode(rateConfig & 0x0Fu);
+}
+
+__inline uint32_t HvDecodeCaptureRateFromConfig(uint8_t rateConfig)
+{
+    return HvDecodeAudioRateCode((rateConfig >> 4) & 0x0Fu);
+}
+
+__inline uint32_t HvAudioPeriodFramesForRate(uint32_t sampleRate)
+{
+    return (sampleRate == HV_AUDIO_SAMPLE_RATE_44100)
+        ? HV_AUDIO_FRAMES_PER_PERIOD_44100
+        : HV_AUDIO_FRAMES_PER_PERIOD;
+}
+
+__inline uint32_t HvAudioPeriodBytesStereo16ForRate(uint32_t sampleRate)
+{
+    return HvAudioPeriodFramesForRate(sampleRate) * HV_AUDIO_BLOCK_ALIGN_STEREO_16;
+}
 
 // ============================================================================
 // 4. Multi-Touch HID Constants
@@ -149,7 +207,7 @@ enum HV_PACKET_TYPE : uint8_t {
     HvPacketType_Pong               = 0x02,
     HvPacketType_AudioRenderPcm     = 0x10, // Guest -> Host: Speaker PCM audio frame
     HvPacketType_AudioCapturePcm    = 0x11, // Host -> Guest: Microphone PCM audio frame
-    HvPacketType_AudioControl       = 0x12, // Bidirectional: KSSTATE_RUN / Mic Gate state
+    HvPacketType_AudioControl       = 0x12, // Bidirectional: KSSTATE_RUN / Mic Gate / Sample Rate state
     HvPacketType_TouchFrame         = 0x20, // Host -> Guest: 64-byte HID Multi-Touch Input Report
     HvPacketType_TouchReset         = 0x21  // Host -> Guest: Zero all touch contacts immediately
 };
@@ -176,10 +234,10 @@ static_assert(sizeof(HV_PACKET_HEADER) == 12, "HV_PACKET_HEADER must be 12 bytes
 
 // 12-byte audio frame header followed immediately by raw interleaved PCM bytes
 typedef struct _HV_AUDIO_FRAME_HEADER {
-    uint32_t SampleRate;        // 48000
+    uint32_t SampleRate;        // 44100 or 48000
     uint16_t Channels;          // 2 (Render/Capture Stereo) or 1 (Capture Mono)
     uint16_t BitsPerSample;     // 16 (or 24)
-    uint16_t FrameSamples;      // Number of samples per channel (e.g., 480 for 10ms)
+    uint16_t FrameSamples;      // Number of samples per channel (e.g., 441 or 480 for 10ms)
     uint16_t Flags;             // HV_AUDIO_FLAGS bitmask
 } HV_AUDIO_FRAME_HEADER, *PHV_AUDIO_FRAME_HEADER;
 
@@ -191,8 +249,8 @@ typedef struct _HV_AUDIO_CONTROL_PAYLOAD {
     uint8_t  GuestCaptureActive;    // 1 when Guest app has Capture Pin in KSSTATE_RUN, 0 otherwise
     uint8_t  GuestRenderActive;     // 1 when Guest app has Render Pin in KSSTATE_RUN, 0 otherwise
     uint8_t  HostMicEnabled;        // 1 when Host user explicitly enabled Mic forwarding
-    uint8_t  Reserved;              // Alignment padding (0)
-    uint32_t SequenceGeneration;    // Incremented inside HvVirtualAudio.sys on every state transition
+    uint8_t  SampleRateConfig;      // Low nibble: Render/HostPref rate code; High nibble: Capture rate code
+    uint32_t SequenceGeneration;    // Incremented inside HvVirtualAudio.sys on every state/rate transition
 } HV_AUDIO_CONTROL_PAYLOAD, *PHV_AUDIO_CONTROL_PAYLOAD;
 
 static_assert(sizeof(HV_AUDIO_CONTROL_PAYLOAD) == 8, "HV_AUDIO_CONTROL_PAYLOAD must be 8 bytes");

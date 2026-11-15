@@ -111,8 +111,10 @@ private:
     PUCHAR                  m_DmaVirtualAddress;
     ULONG                   m_DmaBufferSize;
     ULONG                   m_DmaPosition;
+    ULONG                   m_NotificationCount;
     ULONGLONG               m_TotalBytesTransferred;
-    ULONGLONG               m_LastQpcTimestamp;
+    ULONGLONG               m_TotalFramesTransferred;
+    ULONGLONG               m_RunStartQpc;
     LARGE_INTEGER           m_QpcFrequency;
 
     KTIMER                  m_Timer;

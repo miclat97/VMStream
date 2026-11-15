@@ -1,12 +1,13 @@
 // ============================================================================
 // Program.cs - Entry Point & CLI Argument Parser for HvConsole.Host
 // Supports:
-//   HvConsole.Host.exe --vm "VM Name" [--fullscreen] [--tcp-fallback]
-//   HvConsole.Host.exe --guid "<GUID>" [--fullscreen] [--tcp-fallback]
+//   HvConsole.Host.exe --vm "VM Name" [--fullscreen] [--tcp-fallback] [--audio-rate 44100|48000|auto]
+//   HvConsole.Host.exe --guid "<GUID>" [--fullscreen] [--tcp-fallback] [--audio-rate 44100|48000|auto]
 //   HvConsole.Host.exe (launches dark-mode Hyper-V VM Picker)
 // ============================================================================
 using System;
 using System.Windows.Forms;
+using HvConsole.Host.Audio;
 using HvConsole.Host.Input;
 using HvConsole.Host.UI;
 using HvConsole.Host.Wmi;
@@ -27,6 +28,7 @@ internal static class Program
         string? targetVmNameOrGuid = null;
         bool startFullscreen = false;
         bool forceTcpFallback = false;
+        AudioSampleRatePreference? audioRatePreference = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -47,6 +49,25 @@ internal static class Program
             else if (string.Equals(arg, "--tcp-fallback", StringComparison.OrdinalIgnoreCase))
             {
                 forceTcpFallback = true;
+            }
+            else if ((string.Equals(arg, "--audio-rate", StringComparison.OrdinalIgnoreCase) ||
+                      string.Equals(arg, "--sample-rate", StringComparison.OrdinalIgnoreCase) ||
+                      string.Equals(arg, "-r", StringComparison.OrdinalIgnoreCase)) &&
+                     (i + 1) < args.Length)
+            {
+                if (AudioRateSettings.TryParse(args[++i], out AudioSampleRatePreference parsed))
+                {
+                    audioRatePreference = parsed;
+                }
+            }
+            else if (arg.StartsWith("--audio-rate=", StringComparison.OrdinalIgnoreCase) ||
+                     arg.StartsWith("--sample-rate=", StringComparison.OrdinalIgnoreCase))
+            {
+                int eqIdx = arg.IndexOf('=');
+                if (eqIdx >= 0 && AudioRateSettings.TryParse(arg[(eqIdx + 1)..], out AudioSampleRatePreference parsed))
+                {
+                    audioRatePreference = parsed;
+                }
             }
         }
 
@@ -102,11 +123,11 @@ internal static class Program
                 HyperVVmDiscovery.TryStartVirtualMachine(vm.VmId, out _);
             }
 
-            Application.Run(new ConsoleSessionForm(vm, startFullscreen, forceTcpFallback));
+            Application.Run(new ConsoleSessionForm(vm, startFullscreen, forceTcpFallback, audioRatePreference));
             return 0;
         }
 
-        Application.Run(new VmPickerForm(startFullscreen, forceTcpFallback));
+        Application.Run(new VmPickerForm(startFullscreen, forceTcpFallback, audioRatePreference));
         return 0;
     }
 }

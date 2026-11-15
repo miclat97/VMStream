@@ -35,6 +35,8 @@ public:
           m_PowerState(PowerDeviceD0),
           m_RenderRunning(FALSE),
           m_CaptureRunning(FALSE),
+          m_RenderSampleRate(HV_AUDIO_SAMPLE_RATE),
+          m_CaptureSampleRate(HV_AUDIO_SAMPLE_RATE),
           m_SequenceGeneration(1)
     {
         m_VolumeLevel[0] = 0; // 0 dB
@@ -113,12 +115,68 @@ public:
         }
     }
 
+    STDMETHODIMP_(void) SetRenderFormat(_In_ ULONG SampleRate) override {
+        if (SampleRate != HV_AUDIO_SAMPLE_RATE_44100 && SampleRate != HV_AUDIO_SAMPLE_RATE_48000) {
+            return;
+        }
+
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&m_StateLock, &oldIrql);
+        BOOLEAN changed = (m_RenderSampleRate != SampleRate);
+        m_RenderSampleRate = SampleRate;
+        if (changed) {
+            m_RenderRing.Reset();
+            m_SequenceGeneration++;
+        }
+        KeReleaseSpinLock(&m_StateLock, oldIrql);
+
+        if (changed) {
+            CompleteAllPendingStateIrps(STATUS_SUCCESS);
+        }
+    }
+
+    STDMETHODIMP_(void) SetCaptureFormat(_In_ ULONG SampleRate) override {
+        if (SampleRate != HV_AUDIO_SAMPLE_RATE_44100 && SampleRate != HV_AUDIO_SAMPLE_RATE_48000) {
+            return;
+        }
+
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&m_StateLock, &oldIrql);
+        BOOLEAN changed = (m_CaptureSampleRate != SampleRate);
+        m_CaptureSampleRate = SampleRate;
+        if (changed) {
+            m_CaptureRing.Reset();
+            m_SequenceGeneration++;
+        }
+        KeReleaseSpinLock(&m_StateLock, oldIrql);
+
+        if (changed) {
+            CompleteAllPendingStateIrps(STATUS_SUCCESS);
+        }
+    }
+
     STDMETHODIMP_(BOOLEAN) IsRenderRunning() override {
         return m_RenderRunning;
     }
 
     STDMETHODIMP_(BOOLEAN) IsCaptureRunning() override {
         return m_CaptureRunning;
+    }
+
+    STDMETHODIMP_(ULONG) GetRenderSampleRate() override {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&m_StateLock, &oldIrql);
+        ULONG rate = m_RenderSampleRate;
+        KeReleaseSpinLock(&m_StateLock, oldIrql);
+        return rate;
+    }
+
+    STDMETHODIMP_(ULONG) GetCaptureSampleRate() override {
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&m_StateLock, &oldIrql);
+        ULONG rate = m_CaptureSampleRate;
+        KeReleaseSpinLock(&m_StateLock, oldIrql);
+        return rate;
     }
 
     STDMETHODIMP_(ULONG) PushRenderPcmFromWaveRT(
@@ -160,7 +218,7 @@ public:
         OutState->GuestCaptureActive = m_CaptureRunning ? 1 : 0;
         OutState->GuestRenderActive  = m_RenderRunning ? 1 : 0;
         OutState->HostMicEnabled     = 0;
-        OutState->Reserved           = 0;
+        OutState->SampleRateConfig   = HvPackAudioRateConfig(m_RenderSampleRate, m_CaptureSampleRate);
         OutState->SequenceGeneration = m_SequenceGeneration;
         KeReleaseSpinLock(&m_StateLock, oldIrql);
     }
@@ -223,7 +281,7 @@ public:
             outPayload->GuestCaptureActive = m_CaptureRunning ? 1 : 0;
             outPayload->GuestRenderActive  = m_RenderRunning ? 1 : 0;
             outPayload->HostMicEnabled     = 0;
-            outPayload->Reserved           = 0;
+            outPayload->SampleRateConfig   = HvPackAudioRateConfig(m_RenderSampleRate, m_CaptureSampleRate);
             outPayload->SequenceGeneration = m_SequenceGeneration;
             KeReleaseSpinLock(&m_StateLock, oldIrql);
 
@@ -303,6 +361,8 @@ private:
     KSPIN_LOCK         m_StateLock;
     BOOLEAN            m_RenderRunning;
     BOOLEAN            m_CaptureRunning;
+    ULONG              m_RenderSampleRate;
+    ULONG              m_CaptureSampleRate;
     uint32_t           m_SequenceGeneration;
     LONG               m_VolumeLevel[2];
     BOOL               m_MuteState[2];

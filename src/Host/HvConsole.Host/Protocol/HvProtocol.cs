@@ -25,17 +25,56 @@ public static class HvProtocolConstants
     public const uint PacketMagic = 0x53564D56u; // 'VMVS'
     public const byte ProtocolVersion = 1;
 
-    public const int AudioSampleRate = 48000;
+    public const int AudioSampleRate44100 = 44100;
+    public const int AudioSampleRate48000 = 48000;
+    public const int AudioSampleRate = AudioSampleRate48000;
     public const int AudioChannelsStereo = 2;
     public const int AudioBitsPerSample16 = 16;
     public const int AudioBlockAlignStereo16 = 4;
     public const int AudioPeriodMs = 10;
+    public const int AudioFramesPerPeriod44100 = 441;
+    public const int AudioPeriodBytesStereo16_44100 = 1764; // 441 * 4 bytes
     public const int AudioFramesPerPeriod = 480;
     public const int AudioPeriodBytesStereo16 = 1920; // 480 * 4 bytes
 
     public const int MaxTouchContacts = 10;
     public const ushort TouchCoordinateMax = 32767;
     public const byte TouchReportIdInput = 0x01;
+
+    public static int GetPeriodFramesForRate(int sampleRate) =>
+        sampleRate == AudioSampleRate44100 ? AudioFramesPerPeriod44100 : AudioFramesPerPeriod;
+
+    public static int GetPeriodBytesStereo16ForRate(int sampleRate) =>
+        GetPeriodFramesForRate(sampleRate) * AudioBlockAlignStereo16;
+
+    public static HvAudioRateCode EncodeAudioRateCode(int sampleRate) => sampleRate switch
+    {
+        AudioSampleRate44100 => HvAudioRateCode.Hz44100,
+        AudioSampleRate48000 => HvAudioRateCode.Hz48000,
+        _ => HvAudioRateCode.Default
+    };
+
+    public static int DecodeAudioRateCode(byte code) =>
+        (code & 0x0F) == (byte)HvAudioRateCode.Hz44100
+            ? AudioSampleRate44100
+            : AudioSampleRate48000;
+
+    public static byte PackAudioRateConfig(int renderOrPreferredRate, int captureRate) =>
+        (byte)(((byte)EncodeAudioRateCode(renderOrPreferredRate) & 0x0F) |
+               (((byte)EncodeAudioRateCode(captureRate) & 0x0F) << 4));
+
+    public static int DecodeRenderRateFromConfig(byte rateConfig) =>
+        DecodeAudioRateCode((byte)(rateConfig & 0x0F));
+
+    public static int DecodeCaptureRateFromConfig(byte rateConfig) =>
+        DecodeAudioRateCode((byte)((rateConfig >> 4) & 0x0F));
+}
+
+public enum HvAudioRateCode : byte
+{
+    Default = 0, // Auto / Legacy Default (48000 Hz)
+    Hz44100 = 1, // 44100 Hz
+    Hz48000 = 2  // 48000 Hz
 }
 
 public enum HvPacketType : byte
@@ -44,7 +83,7 @@ public enum HvPacketType : byte
     Pong            = 0x02,
     AudioRenderPcm  = 0x10, // Guest -> Host: Speaker PCM audio frame
     AudioCapturePcm = 0x11, // Host -> Guest: Microphone PCM audio frame
-    AudioControl    = 0x12, // Bidirectional: Guest KSSTATE_RUN / Host Mic Gate
+    AudioControl    = 0x12, // Bidirectional: Guest KSSTATE_RUN / Host Mic Gate / Sample Rate
     TouchFrame      = 0x20, // Host -> Guest: 64-byte HID Multi-Touch Input Report
     TouchReset      = 0x21  // Host -> Guest: Release all contacts immediately
 }
@@ -73,10 +112,10 @@ public struct HvPacketHeader
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 public struct HvAudioFrameHeader
 {
-    public uint SampleRate;     // 48000
-    public ushort Channels;     // 2
+    public uint SampleRate;     // 44100 or 48000
+    public ushort Channels;     // 2 (Stereo) or 1 (Mono)
     public ushort BitsPerSample;// 16
-    public ushort FrameSamples; // 480
+    public ushort FrameSamples; // 441 or 480 for 10ms
     public ushort Flags;        // HvAudioFlags
 
     public const int Size = 12;
@@ -88,7 +127,7 @@ public struct HvAudioControlPayload
     public byte GuestCaptureActive; // 1 when Guest app has Capture Pin in KSSTATE_RUN
     public byte GuestRenderActive;  // 1 when Guest app has Render Pin in KSSTATE_RUN
     public byte HostMicEnabled;     // 1 when Host user explicitly enabled Mic
-    public byte Reserved;
+    public byte SampleRateConfig;   // Low nibble: Render/HostPref rate code; High nibble: Capture rate code
     public uint SequenceGeneration;
 
     public const int Size = 8;

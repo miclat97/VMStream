@@ -43,5 +43,8 @@ private:
     std::atomic<bool>              m_HostMicEnabled;
     std::atomic<bool>              m_GuestRenderActive;
     std::atomic<bool>              m_GuestCaptureActive;
+    std::atomic<uint32_t>          m_GuestRenderSampleRate;
+    std::atomic<uint32_t>          m_GuestCaptureSampleRate;
+    std::atomic<uint32_t>          m_HostPreferredSampleRate;
     std::thread                    m_MainThread;
 };

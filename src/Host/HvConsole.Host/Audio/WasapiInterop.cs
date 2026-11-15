@@ -63,6 +63,8 @@ internal struct WAVEFORMATEX
     public ushort cbSize;
 
     public const ushort WAVE_FORMAT_PCM = 1;
+    public const ushort WAVE_FORMAT_IEEE_FLOAT = 3;
+    public const ushort WAVE_FORMAT_EXTENSIBLE = 0xFFFE;
 
     public static WAVEFORMATEX CreatePcm(uint sampleRate, ushort channels, ushort bitsPerSample)
     {
@@ -76,6 +78,44 @@ internal struct WAVEFORMATEX
             nBlockAlign = blockAlign,
             wBitsPerSample = bitsPerSample,
             cbSize = 0
+        };
+    }
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal struct WAVEFORMATEXTENSIBLE
+{
+    public WAVEFORMATEX Format;
+    public ushort wValidBitsPerSample;
+    public uint dwChannelMask;
+    public Guid SubFormat;
+
+    public const uint SPEAKER_FRONT_LEFT = 0x1;
+    public const uint SPEAKER_FRONT_RIGHT = 0x2;
+    public const uint SPEAKER_FRONT_CENTER = 0x4;
+    public const uint SPEAKER_STEREO = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
+
+    public static WAVEFORMATEXTENSIBLE CreateIeeeFloatStereo(uint sampleRate)
+    {
+        const ushort channels = 2;
+        const ushort bitsPerSample = 32;
+        const ushort blockAlign = channels * (bitsPerSample / 8);
+
+        return new WAVEFORMATEXTENSIBLE
+        {
+            Format = new WAVEFORMATEX
+            {
+                wFormatTag = WAVEFORMATEX.WAVE_FORMAT_EXTENSIBLE,
+                nChannels = channels,
+                nSamplesPerSec = sampleRate,
+                nAvgBytesPerSec = sampleRate * blockAlign,
+                nBlockAlign = blockAlign,
+                wBitsPerSample = bitsPerSample,
+                cbSize = 22
+            },
+            wValidBitsPerSample = bitsPerSample,
+            dwChannelMask = SPEAKER_STEREO,
+            SubFormat = WasapiGuids.KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
         };
     }
 }
@@ -122,7 +162,7 @@ internal interface IAudioClient
         AudioClientStreamFlags StreamFlags,
         long hnsBufferDuration,
         long hnsPeriodicity,
-        ref WAVEFORMATEX pFormat,
+        IntPtr pFormat,
         IntPtr AudioSessionGuid
     );
 
@@ -136,7 +176,7 @@ internal interface IAudioClient
     int GetCurrentPadding(out uint pNumPaddingFrames);
 
     [PreserveSig]
-    int IsFormatSupported(AudioClientShareMode ShareMode, ref WAVEFORMATEX pFormat, out IntPtr ppClosestMatch);
+    int IsFormatSupported(AudioClientShareMode ShareMode, IntPtr pFormat, out IntPtr ppClosestMatch);
 
     [PreserveSig]
     int GetMixFormat(out IntPtr ppDeviceFormat);
@@ -198,4 +238,17 @@ internal static class WasapiGuids
     public static Guid IID_IAudioClient        = new("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
     public static Guid IID_IAudioRenderClient  = new("F294ACFC-3146-4483-A7BF-ADDCA7C260E2");
     public static Guid IID_IAudioCaptureClient = new("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
+
+    public static readonly Guid KSDATAFORMAT_SUBTYPE_PCM        = new("00000001-0000-0010-8000-00AA00389B71");
+    public static readonly Guid KSDATAFORMAT_SUBTYPE_IEEE_FLOAT = new("00000003-0000-0010-8000-00AA00389B71");
+}
+
+internal static class AvrtNative
+{
+    [DllImport("avrt.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr AvSetMmThreadCharacteristicsW(string taskName, out uint taskIndex);
+
+    [DllImport("avrt.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AvRevertMmThreadCharacteristics(IntPtr avrtHandle);
 }

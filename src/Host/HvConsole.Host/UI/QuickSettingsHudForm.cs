@@ -7,6 +7,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 using System.Windows.Forms;
 using HvConsole.Host.Audio;
 using HvConsole.Host.Input;
@@ -26,15 +27,18 @@ public sealed class QuickSettingsHudForm : Form
     private readonly Label _lblVmHeader;
     private readonly Label _lblTransportStatus;
     private readonly Label _lblBufferStats;
+    private readonly Label _lblSpeakerTitle;
     private readonly Label _lblVolumeValue;
     private readonly TrackBar _sliderVolume;
     private readonly Button _btnSpeakerMute;
+    private readonly ComboBox _cmbSampleRate;
     private readonly Button _btnMicToggle;
     private readonly Label _lblMicSubstatus;
     private readonly CheckBox _chkGateKsState;
     private readonly Button _btnToggleFullscreen;
     private readonly Button _btnDisconnect;
     private readonly System.Windows.Forms.Timer _refreshTimer;
+    private bool _suppressRateEvents;
 
     public event Action? RequestToggleFullscreen;
     public event Action? RequestDisconnect;
@@ -61,7 +65,7 @@ public sealed class QuickSettingsHudForm : Form
         DoubleBuffered = true;
         BackColor = Color.FromArgb(15, 23, 42);
         ForeColor = Color.FromArgb(241, 245, 249);
-        Size = new Size(460, 430);
+        Size = new Size(460, 468);
         Opacity = 0.97;
 
         var headerFont = new Font("Segoe UI Semibold", 12f, FontStyle.Bold);
@@ -109,13 +113,13 @@ public sealed class QuickSettingsHudForm : Form
         };
 
         // --- Speaker Section ---
-        var lblSpeakerTitle = new Label
+        _lblSpeakerTitle = new Label
         {
-            Text = "SPEAKER PLAYBACK (48 kHz WaveRT -> Host WASAPI)",
+            Text = "SPEAKER PLAYBACK (WaveRT -> Host WASAPI)",
             Font = sectionFont,
             ForeColor = Color.FromArgb(203, 213, 225),
             Location = new Point(20, 126),
-            Size = new Size(340, 20)
+            Size = new Size(420, 20)
         };
 
         _btnSpeakerMute = new Button
@@ -161,13 +165,51 @@ public sealed class QuickSettingsHudForm : Form
             _lblVolumeValue.Text = $"{_sliderVolume.Value}%";
         };
 
+        var lblSampleRate = new Label
+        {
+            Text = "Sample Rate (WASAPI):",
+            Font = bodyFont,
+            ForeColor = Color.FromArgb(148, 163, 184),
+            Location = new Point(20, 199),
+            Size = new Size(165, 22)
+        };
+
+        _cmbSampleRate = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FlatStyle = FlatStyle.Flat,
+            Font = bodyFont,
+            BackColor = Color.FromArgb(30, 41, 59),
+            ForeColor = Color.FromArgb(241, 245, 249),
+            Location = new Point(195, 195),
+            Size = new Size(245, 26)
+        };
+        _cmbSampleRate.Items.AddRange(new object[]
+        {
+            AudioRateSettings.FormatDisplay(AudioSampleRatePreference.Auto),
+            AudioRateSettings.FormatDisplay(AudioSampleRatePreference.Hz44100),
+            AudioRateSettings.FormatDisplay(AudioSampleRatePreference.Hz48000)
+        });
+        _cmbSampleRate.SelectedIndexChanged += (_, _) =>
+        {
+            if (_suppressRateEvents) return;
+            AudioSampleRatePreference selected = _cmbSampleRate.SelectedIndex switch
+            {
+                1 => AudioSampleRatePreference.Hz44100,
+                2 => AudioSampleRatePreference.Hz48000,
+                _ => AudioSampleRatePreference.Auto
+            };
+            _audioEngine.SetSampleRatePreference(selected, persist: true);
+            UpdateUiState();
+        };
+
         // --- Microphone Privacy Section ---
         var lblMicTitle = new Label
         {
             Text = "HOST MICROPHONE PRIVACY LOCK (Ctrl+Alt+Shift+M)",
             Font = sectionFont,
             ForeColor = Color.FromArgb(203, 213, 225),
-            Location = new Point(20, 204),
+            Location = new Point(20, 242),
             Size = new Size(420, 20)
         };
 
@@ -175,7 +217,7 @@ public sealed class QuickSettingsHudForm : Form
         {
             Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
             FlatStyle = FlatStyle.Flat,
-            Location = new Point(20, 230),
+            Location = new Point(20, 268),
             Size = new Size(420, 44)
         };
         _btnMicToggle.Click += (_, _) => RequestToggleMicrophone?.Invoke();
@@ -184,7 +226,7 @@ public sealed class QuickSettingsHudForm : Form
         {
             Font = bodyFont,
             ForeColor = Color.FromArgb(148, 163, 184),
-            Location = new Point(20, 280),
+            Location = new Point(20, 318),
             Size = new Size(420, 22)
         };
 
@@ -194,7 +236,7 @@ public sealed class QuickSettingsHudForm : Form
             Font = new Font("Segoe UI", 8.5f),
             ForeColor = Color.FromArgb(203, 213, 225),
             Checked = _audioEngine.GateMicOnGuestKsState,
-            Location = new Point(22, 306),
+            Location = new Point(22, 344),
             Size = new Size(420, 24)
         };
         _chkGateKsState.CheckedChanged += (_, _) =>
@@ -211,7 +253,7 @@ public sealed class QuickSettingsHudForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
             ForeColor = Color.FromArgb(241, 245, 249),
-            Location = new Point(20, 348),
+            Location = new Point(20, 386),
             Size = new Size(280, 38)
         };
         _btnToggleFullscreen.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
@@ -228,7 +270,7 @@ public sealed class QuickSettingsHudForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(127, 29, 29),
             ForeColor = Color.White,
-            Location = new Point(312, 348),
+            Location = new Point(312, 386),
             Size = new Size(128, 38)
         };
         _btnDisconnect.FlatAppearance.BorderColor = Color.FromArgb(185, 28, 28);
@@ -240,7 +282,7 @@ public sealed class QuickSettingsHudForm : Form
             Font = new Font("Segoe UI", 8.0f),
             ForeColor = Color.FromArgb(100, 116, 139),
             TextAlign = ContentAlignment.MiddleCenter,
-            Location = new Point(20, 398),
+            Location = new Point(20, 436),
             Size = new Size(420, 18)
         };
 
@@ -250,10 +292,12 @@ public sealed class QuickSettingsHudForm : Form
             btnCloseHud,
             _lblTransportStatus,
             _lblBufferStats,
-            lblSpeakerTitle,
+            _lblSpeakerTitle,
             _btnSpeakerMute,
             _sliderVolume,
             _lblVolumeValue,
+            lblSampleRate,
+            _cmbSampleRate,
             lblMicTitle,
             _btnMicToggle,
             _lblMicSubstatus,
@@ -329,9 +373,38 @@ public sealed class QuickSettingsHudForm : Form
             $"Audio Socket : {audioStatus}\n" +
             $"Touch Socket : {touchStatus}";
 
+        double guestRateKhz = _audioEngine.ActiveGuestRenderSampleRate / 1000.0;
+        double hostRateKhz = _audioEngine.ActiveRenderSampleRate / 1000.0;
+        string fmtTag = _audioEngine.RenderUsesFloat32 ? "Float32" : "PCM16";
+        string drvTag = _audioEngine.RenderUsesEventCallback ? "Event" : "Poll";
+        _lblSpeakerTitle.Text = string.Format(
+            CultureInfo.InvariantCulture,
+            "SPEAKER ({0:0.#} kHz -> {1:0.#} kHz {2}/{3})",
+            guestRateKhz,
+            hostRateKhz,
+            fmtTag,
+            drvTag
+        );
+
         var jb = _audioEngine.JitterBuffer;
         _lblBufferStats.Text =
-            $"Jitter Buffer: {jb.BufferedMilliseconds:F1} ms (Target 25ms) | Drift: -{jb.TotalDroppedFramesForDrift} / +{jb.TotalDuplicatedFramesForDrift}";
+            $"Buffer: {jb.BufferedMilliseconds:F1}ms (T:22ms) | Drift:-{jb.TotalDroppedFramesForDrift}/+{jb.TotalDuplicatedFramesForDrift} | XRun:{jb.TotalUnderruns}";
+
+        if (!_cmbSampleRate.DroppedDown)
+        {
+            int desiredIndex = _audioEngine.SampleRatePreference switch
+            {
+                AudioSampleRatePreference.Hz44100 => 1,
+                AudioSampleRatePreference.Hz48000 => 2,
+                _ => 0
+            };
+            if (_cmbSampleRate.SelectedIndex != desiredIndex)
+            {
+                _suppressRateEvents = true;
+                try { _cmbSampleRate.SelectedIndex = desiredIndex; }
+                finally { _suppressRateEvents = false; }
+            }
+        }
 
         if (_audioEngine.SpeakerMuted)
         {
@@ -355,11 +428,16 @@ public sealed class QuickSettingsHudForm : Form
         }
         else if (_audioEngine.IsMicHardwareOpen)
         {
+            double captureKhz = _audioEngine.TargetCaptureSampleRate / 1000.0;
             _btnMicToggle.Text = "\U0001F399\uFE0F  MICROPHONE LIVE - STREAMING TO GUEST VM (Click to Mute)";
             _btnMicToggle.BackColor = Color.FromArgb(153, 27, 27);
             _btnMicToggle.ForeColor = Color.White;
             _btnMicToggle.FlatAppearance.BorderColor = Color.FromArgb(248, 113, 113);
-            _lblMicSubstatus.Text = "Host WASAPI IAudioClient is OPEN (48 kHz 16-bit PCM active).";
+            _lblMicSubstatus.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "Host WASAPI IAudioClient is OPEN ({0:0.#} kHz 16-bit PCM active).",
+                captureKhz
+            );
         }
         else
         {

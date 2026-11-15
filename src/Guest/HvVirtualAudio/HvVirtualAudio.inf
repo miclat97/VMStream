@@ -1,8 +1,8 @@
 ; ============================================================================
 ; HvVirtualAudio.inf - WDK PortCls/WaveRT Virtual Audio Driver Installation File
 ; Exposes:
-;   1. Playback Endpoint: "Hyper-V Console Speakers" (48 kHz, 16/24-bit Stereo)
-;   2. Capture Endpoint:  "Hyper-V Console Microphone" (48 kHz, 16-bit Stereo/Mono)
+;   1. Playback Endpoint: "Hyper-V Console Speakers" (44.1/48 kHz, 16/24-bit Stereo)
+;   2. Capture Endpoint:  "Hyper-V Console Microphone" (44.1/48 kHz, 16-bit Stereo/Mono)
 ; ============================================================================
 
 [Version]

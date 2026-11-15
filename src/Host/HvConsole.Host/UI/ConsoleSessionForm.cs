@@ -6,6 +6,7 @@
 // ============================================================================
 using System;
 using System.Drawing;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using HvConsole.Host.Audio;
@@ -75,6 +76,26 @@ public sealed class ConsoleSessionForm : Form
     [DllImport("winmm.dll")]
     private static extern uint timeEndPeriod(uint uPeriod);
 
+    private const int WM_DISPLAYCHANGE = 0x007E;
+    private const int WM_NCACTIVATE    = 0x0086;
+    private const int WM_DEVICECHANGE  = 0x0219;
+
+    /// <summary>
+    /// Selectable dark canvas hosting the unstretched RdpConsoleControl (Dock = None).
+    /// Being Selectable allows Deactivate() / Alt+Space focus release to land cleanly
+    /// without WinForms bouncing focus immediately back into the ActiveX control.
+    /// </summary>
+    private sealed class ViewportHostPanel : Panel
+    {
+        public ViewportHostPanel()
+        {
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = false;
+            Dock = DockStyle.Fill;
+            BackColor = Color.Black;
+        }
+    }
+
     private readonly HyperVVmInfo _vmInfo;
     private readonly IHvTransport _audioTransport;
     private readonly IHvTransport _touchTransport;
@@ -82,6 +103,7 @@ public sealed class ConsoleSessionForm : Form
     private readonly TouchWindowInterceptor _touchInterceptor;
     private readonly LowLevelKeyboardHook _keyboardHook;
 
+    private readonly ViewportHostPanel _rdpViewportPanel;
     private readonly RdpConsoleControl _rdpControl;
     private readonly Panel _statusBannerPanel;
     private readonly Label _lblBannerMessage;
@@ -91,6 +113,7 @@ public sealed class ConsoleSessionForm : Form
     private readonly System.Windows.Forms.Timer _hookReassertTimer;
 
     private bool _isBorderlessFullscreen;
+    private ZoomLevel? _preFullscreenZoomLevel;
     private bool _edgeGesturePropSet;
     private bool _isClosing;
     private FormWindowState _savedWindowState = FormWindowState.Normal;
@@ -98,17 +121,22 @@ public sealed class ConsoleSessionForm : Form
     private Rectangle _savedWindowBounds = new(100, 100, 1440, 900);
     private bool _startInFullscreen;
 
-    public ConsoleSessionForm(HyperVVmInfo vmInfo, bool startInFullscreen = false, bool forceTcpFallback = false)
+    public ConsoleSessionForm(
+        HyperVVmInfo vmInfo,
+        bool startInFullscreen = false,
+        bool forceTcpFallback = false,
+        AudioSampleRatePreference? sampleRatePreference = null)
     {
         _vmInfo = vmInfo;
         _startInFullscreen = startInFullscreen;
 
         Text = $"VMStream - {_vmInfo.Name} [Console Session | Mic: OFF (Locked)]";
-        BackColor = Color.FromArgb(10, 14, 23);
+        BackColor = Color.Black;
         ForeColor = Color.FromArgb(241, 245, 249);
         StartPosition = FormStartPosition.CenterScreen;
         Size = new Size(1440, 900);
         MinimumSize = new Size(800, 600);
+        KeyPreview = true;
 
         // Initialize VM-isolated AF_HYPERV transports (bound to exact VmId, never wildcard)
         _audioTransport = new HvSocketTransport(
@@ -125,7 +153,7 @@ public sealed class ConsoleSessionForm : Form
             forceTcpFallback
         );
 
-        _audioEngine = new HostAudioEngine(_audioTransport);
+        _audioEngine = new HostAudioEngine(_audioTransport, sampleRatePreference);
         _touchInterceptor = new TouchWindowInterceptor(_touchTransport);
         _keyboardHook = new LowLevelKeyboardHook();
 
@@ -141,7 +169,20 @@ public sealed class ConsoleSessionForm : Form
         _hudForm.RequestToggleFullscreen += () => BeginInvoke(ToggleBorderlessFullscreen);
         _hudForm.RequestDisconnect += () => BeginInvoke(Close);
         _hudForm.RequestToggleMicrophone += () => BeginInvoke(ToggleMicrophoneWithFeedback);
-        _hudForm.VisibleChanged += (_, _) => ScheduleKeyboardHookBringToFront();
+        _hudForm.VisibleChanged += (_, _) =>
+        {
+            if (!_hudForm.Visible && !_isClosing && IsHandleCreated && _rdpControl.IsConnected)
+            {
+                BeginInvoke(() =>
+                {
+                    if (!IsDisposed && !_isClosing && !_hudForm.Visible)
+                    {
+                        _rdpControl.CaptureKeyboardFocus();
+                    }
+                });
+            }
+            ScheduleKeyboardHookBringToFront();
+        };
 
         _keyboardHook.IsHudVisibleCallback = () => _hudForm.Visible;
         _keyboardHook.ToggleFullscreenRequested += () => BeginInvoke(ToggleBorderlessFullscreen);
@@ -181,20 +222,62 @@ public sealed class ConsoleSessionForm : Form
         };
         _statusBannerPanel.Controls.Add(_lblBannerMessage);
 
+        _rdpViewportPanel = new ViewportHostPanel();
+        _rdpViewportPanel.Resize += (_, _) =>
+        {
+            if (!IsDisposed && _rdpControl != null && _rdpControl.IsHandleCreated)
+            {
+                _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
+            }
+        };
+
         _rdpControl = new RdpConsoleControl
         {
-            Dock = DockStyle.Fill
+            Name = "RdpClient",
+            Dock = DockStyle.None,
+            Location = Point.Empty,
+            Size = RdpConsoleControl.BiosResolution
         };
+
         ((System.ComponentModel.ISupportInitialize)_rdpControl).BeginInit();
-        Controls.Add(_rdpControl);
+        _rdpViewportPanel.Controls.Add(_rdpControl);
+        Controls.Add(_rdpViewportPanel);
         Controls.Add(_statusBannerPanel);
         ((System.ComponentModel.ISupportInitialize)_rdpControl).EndInit();
 
         _rdpControl.Connecting += OnRdpConnecting;
         _rdpControl.Connected += OnRdpConnected;
+        _rdpControl.LoginCompleted += OnRdpLoginCompleted;
         _rdpControl.Disconnected += OnRdpDisconnected;
         _rdpControl.FatalError += OnRdpFatalError;
         _rdpControl.RemoteDesktopSizeChanged += OnRdpDesktopSizeChanged;
+        _rdpControl.RequestEnterFullScreen += () =>
+        {
+            if (!IsDisposed && !_isClosing && IsHandleCreated)
+                BeginInvoke(() => SetBorderlessFullscreen(true));
+        };
+        _rdpControl.RequestExitFullScreen += () =>
+        {
+            if (!IsDisposed && !_isClosing && IsHandleCreated)
+                BeginInvoke(() => SetBorderlessFullscreen(false));
+        };
+        _rdpControl.RequestContainerMinimize += () =>
+        {
+            if (!IsDisposed && !_isClosing && IsHandleCreated)
+                BeginInvoke(() => WindowState = FormWindowState.Minimized);
+        };
+        _rdpControl.RequestClose += () =>
+        {
+            if (!IsDisposed && !_isClosing && IsHandleCreated)
+                BeginInvoke(Close);
+        };
+        _rdpControl.FocusReleased += _ =>
+        {
+            if (!IsDisposed && !_isClosing && IsHandleCreated)
+                BeginInvoke(ReleaseFocusToViewportHost);
+        };
+        _rdpControl.AltSpaceReleased += ReleaseFocusToViewportHost;
+        _rdpControl.MouseActivate += (_, _) => ScheduleKeyboardHookBringToFront();
 
         // Reassert WH_KEYBOARD_LL chain priority shortly after focus/connect/fullscreen transitions
         // so Ctrl+Alt+Shift+* hotkeys stay ahead of mstscax.dll's KeyboardHookMode=1 hook.
@@ -242,6 +325,8 @@ public sealed class ConsoleSessionForm : Form
             _rdpControl.CreateControl();
         }
 
+        _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
+
         if (_touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle) > 0)
         {
             ScheduleKeyboardHookBringToFront();
@@ -250,9 +335,11 @@ public sealed class ConsoleSessionForm : Form
 
         BeginInvoke(() =>
         {
+            if (IsDisposed || _isClosing) return;
             try
             {
-                _rdpControl.ConnectToHyperVConsole(_vmInfo.VmId);
+                _rdpControl.ConnectToHyperVConsole(_vmInfo.VmId, _vmInfo.Name);
+                _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
                 _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
                 ScheduleKeyboardHookBringToFront();
             }
@@ -264,6 +351,86 @@ public sealed class ConsoleSessionForm : Form
         });
     }
 
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        if (IsDisposed || _isClosing) return;
+
+        if (!_isBorderlessFullscreen && _rdpControl.IsConnected)
+        {
+            _rdpControl.SetZoomLevel(ZoomLevel.Auto, _rdpViewportPanel.ClientSize, isFullScreen: false);
+        }
+        else
+        {
+            _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
+        }
+    }
+
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Tab && !_hudForm.Visible && _rdpControl.IsConnected)
+        {
+            _rdpControl.CaptureKeyboardFocus();
+        }
+        base.OnKeyUp(e);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WM_DEVICECHANGE && !_isClosing && _rdpControl != null && _rdpControl.IsHandleCreated)
+        {
+            _rdpControl.NotifyRedirectDeviceChange(m.WParam, m.LParam);
+        }
+
+        base.WndProc(ref m);
+
+        if (IsDisposed || _isClosing || _rdpControl == null || _rdpViewportPanel == null || _hudForm == null) return;
+
+        if (m.Msg == WM_DISPLAYCHANGE)
+        {
+            if (_isBorderlessFullscreen)
+            {
+                Bounds = Screen.FromControl(this).Bounds;
+            }
+            _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
+        }
+        else if (m.Msg == WM_NCACTIVATE)
+        {
+            if (m.WParam != IntPtr.Zero)
+            {
+                if (!_hudForm.Visible && _rdpControl.IsHandleCreated)
+                {
+                    _rdpControl.CaptureKeyboardFocus();
+                }
+                ScheduleKeyboardHookBringToFront();
+            }
+            else
+            {
+                _rdpControl.Deactivate();
+            }
+        }
+    }
+
+    private void ReleaseFocusToViewportHost()
+    {
+        if (IsDisposed || _isClosing) return;
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(ReleaseFocusToViewportHost);
+                }
+            }
+            catch { }
+            return;
+        }
+
+        _rdpViewportPanel.Focus();
+    }
+
     private void OnRdpConnecting()
     {
         if (InvokeRequired)
@@ -271,8 +438,14 @@ public sealed class ConsoleSessionForm : Form
             BeginInvoke(OnRdpConnecting);
             return;
         }
+        if (IsDisposed || _isClosing) return;
+
         _statusBannerPanel.Visible = true;
+        _lblBannerMessage.ForeColor = Color.FromArgb(148, 163, 184);
         _lblBannerMessage.Text = $"Authenticating with Hyper-V VMMS (localhost:2179, PCB={_vmInfo.PcbGuidString})...";
+        PerformLayout();
+        _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
+
         if (_rdpControl.IsHandleCreated &&
             _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle) > 0)
         {
@@ -287,17 +460,41 @@ public sealed class ConsoleSessionForm : Form
             BeginInvoke(OnRdpConnected);
             return;
         }
+        if (IsDisposed || _isClosing) return;
 
         // Hide status banner for a zero-chrome distraction-free viewport
         _statusBannerPanel.Visible = false;
+        PerformLayout();
 
         // Subclass internal IHWindowClass child window of mstscax.dll for WM_POINTER capture
         _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
         _subclassWatchdogTimer.Start();
 
-        if (_isBorderlessFullscreen)
+        if (!_rdpControl.HasActiveVideo)
         {
-            _rdpControl.SyncFullScreenState(true);
+            _rdpControl.Visible = false;
+            _statusBannerPanel.Visible = true;
+            _lblBannerMessage.ForeColor = Color.FromArgb(148, 163, 184);
+            _lblBannerMessage.Text = "Virtual machine video is not active (240x240 disabled-video state).";
+            PerformLayout();
+        }
+        else
+        {
+            _rdpControl.Visible = true;
+            if (_isBorderlessFullscreen)
+            {
+                _rdpControl.SetZoomLevel(ZoomLevel.P100, _rdpViewportPanel.ClientSize, isFullScreen: true);
+                _rdpControl.SyncFullScreenState(true);
+            }
+            else
+            {
+                _rdpControl.SetZoomLevel(ZoomLevel.Auto, _rdpViewportPanel.ClientSize, isFullScreen: false);
+            }
+
+            if (!_hudForm.Visible)
+            {
+                _rdpControl.CaptureKeyboardFocus();
+            }
         }
 
         ScheduleKeyboardHookBringToFront();
@@ -312,12 +509,53 @@ public sealed class ConsoleSessionForm : Form
         );
     }
 
+    private void OnRdpLoginCompleted()
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(OnRdpLoginCompleted);
+            return;
+        }
+        if (IsDisposed || _isClosing || !_rdpControl.IsConnected || !_rdpControl.HasActiveVideo) return;
+
+        ZoomLevel desired = _isBorderlessFullscreen ? ZoomLevel.P100 : ZoomLevel.Auto;
+        ZoomLevel resolved = desired == ZoomLevel.Auto ? _rdpControl.ComputeAutoZoomLevel() : desired;
+        if (_rdpControl.CurrentZoomLevel != resolved)
+        {
+            _rdpControl.SetZoomLevel(desired, _rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
+        }
+    }
+
     private void OnRdpDesktopSizeChanged(int width, int height)
     {
         if (InvokeRequired)
         {
             BeginInvoke(() => OnRdpDesktopSizeChanged(width, height));
             return;
+        }
+        if (IsDisposed || _isClosing) return;
+
+        if (!_rdpControl.HasActiveVideo && _rdpControl.IsConnected)
+        {
+            _rdpControl.Visible = false;
+            _statusBannerPanel.Visible = true;
+            _lblBannerMessage.ForeColor = Color.FromArgb(148, 163, 184);
+            _lblBannerMessage.Text = "Virtual machine video is not active (240x240 disabled-video state).";
+            PerformLayout();
+        }
+        else
+        {
+            if (!_rdpControl.Visible)
+            {
+                _rdpControl.Visible = true;
+                if (_rdpControl.IsConnected && _statusBannerPanel.Visible)
+                {
+                    _statusBannerPanel.Visible = false;
+                    PerformLayout();
+                }
+            }
+
+            _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
         }
 
         if (_rdpControl.IsHandleCreated &&
@@ -334,6 +572,7 @@ public sealed class ConsoleSessionForm : Form
             BeginInvoke(() => OnRdpDisconnected(reason));
             return;
         }
+        if (IsDisposed || _isClosing) return;
 
         _subclassWatchdogTimer.Stop();
         _hookReassertTimer.Stop();
@@ -343,6 +582,8 @@ public sealed class ConsoleSessionForm : Form
         _statusBannerPanel.Visible = true;
         _lblBannerMessage.ForeColor = Color.FromArgb(251, 191, 36);
         _lblBannerMessage.Text = $"Console session disconnected (Reason code: 0x{reason:X}). Close window or restart VM.";
+        PerformLayout();
+        _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
     }
 
     private void OnRdpFatalError(int errorCode)
@@ -352,10 +593,13 @@ public sealed class ConsoleSessionForm : Form
             BeginInvoke(() => OnRdpFatalError(errorCode));
             return;
         }
+        if (IsDisposed || _isClosing) return;
 
         _statusBannerPanel.Visible = true;
         _lblBannerMessage.ForeColor = Color.FromArgb(248, 113, 113);
         _lblBannerMessage.Text = $"RDP ActiveX Fatal Error: 0x{errorCode:X}";
+        PerformLayout();
+        _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
     }
 
     // ========================================================================
@@ -369,23 +613,51 @@ public sealed class ConsoleSessionForm : Form
     public void SetBorderlessFullscreen(bool enableFullscreen)
     {
         if (_isBorderlessFullscreen == enableFullscreen) return;
-        _isBorderlessFullscreen = enableFullscreen;
+
+        SuspendLayout();
+        try
+        {
+            if (enableFullscreen)
+            {
+                _savedWindowState = WindowState;
+                _savedBorderStyle = FormBorderStyle;
+                _savedWindowBounds = WindowState == FormWindowState.Maximized ? RestoreBounds : Bounds;
+                _preFullscreenZoomLevel ??= (_rdpControl.IsConnected ? _rdpControl.CurrentZoomLevel : ZoomLevel.Auto);
+
+                if (WindowState == FormWindowState.Maximized)
+                {
+                    WindowState = FormWindowState.Normal;
+                }
+
+                FormBorderStyle = FormBorderStyle.None;
+                Screen currentScreen = Screen.FromControl(this);
+                Bounds = currentScreen.Bounds;
+                _statusBannerPanel.Visible = false;
+                _isBorderlessFullscreen = true;
+            }
+            else
+            {
+                _isBorderlessFullscreen = false;
+                _rdpControl.SyncFullScreenState(false);
+
+                FormBorderStyle = _savedBorderStyle;
+                Bounds = _savedWindowBounds;
+                WindowState = _savedWindowState;
+                if (!_rdpControl.IsConnected)
+                {
+                    _statusBannerPanel.Visible = true;
+                }
+            }
+        }
+        finally
+        {
+            ResumeLayout(true);
+        }
 
         if (enableFullscreen)
         {
-            _savedWindowState = WindowState;
-            _savedBorderStyle = FormBorderStyle;
-            _savedWindowBounds = Bounds;
-
-            if (WindowState == FormWindowState.Maximized)
-            {
-                WindowState = FormWindowState.Normal;
-            }
-
-            FormBorderStyle = FormBorderStyle.None;
-            Screen currentScreen = Screen.FromControl(this);
-            Bounds = currentScreen.Bounds;
-            _statusBannerPanel.Visible = false;
+            _rdpControl.SetZoomLevel(ZoomLevel.P100, _rdpViewportPanel.ClientSize, isFullScreen: true);
+            _rdpControl.SyncFullScreenState(true);
 
             _toastForm.ShowToast(
                 this,
@@ -397,9 +669,9 @@ public sealed class ConsoleSessionForm : Form
         }
         else
         {
-            FormBorderStyle = _savedBorderStyle;
-            Bounds = _savedWindowBounds;
-            WindowState = _savedWindowState;
+            ZoomLevel restoreZoom = _preFullscreenZoomLevel ?? ZoomLevel.Auto;
+            _rdpControl.SetZoomLevel(restoreZoom, _rdpViewportPanel.ClientSize, isFullScreen: false);
+            _preFullscreenZoomLevel = null;
 
             _toastForm.ShowToast(
                 this,
@@ -411,9 +683,9 @@ public sealed class ConsoleSessionForm : Form
         }
 
         SetFullscreenEdgeGestureDisabled(enableFullscreen);
-        _rdpControl.SyncFullScreenState(enableFullscreen);
-        _rdpControl.Focus();
+        _rdpControl.CaptureKeyboardFocus();
         ScheduleKeyboardHookBringToFront();
+        Update();
     }
 
     // ========================================================================
@@ -424,7 +696,7 @@ public sealed class ConsoleSessionForm : Form
         if (_hudForm.Visible)
         {
             _hudForm.Hide();
-            _rdpControl.Focus();
+            _rdpControl.CaptureKeyboardFocus();
             ScheduleKeyboardHookBringToFront();
         }
         else
@@ -450,10 +722,11 @@ public sealed class ConsoleSessionForm : Form
         }
         else if (_audioEngine.IsMicHardwareOpen)
         {
+            double captureKhz = _audioEngine.TargetCaptureSampleRate / 1000.0;
             _toastForm.ShowToast(
                 this,
                 "[LIVE] Host Microphone: LIVE STREAMING",
-                "Streaming 48 kHz PCM over AF_HYPERV to Guest VM",
+                string.Format(CultureInfo.InvariantCulture, "Streaming {0:0.#} kHz PCM over AF_HYPERV to Guest VM", captureKhz),
                 Color.FromArgb(239, 68, 68),
                 2400
             );

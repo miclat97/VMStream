@@ -1,11 +1,14 @@
 // ============================================================================
-// AdaptiveJitterBuffer.cs - Low-Latency Circular Buffer & Clock Drift Regulator
-// Maintains ~25ms target buffer level (48 kHz, 16-bit Stereo PCM):
-//   - If buffer exceeds 35ms: drops 1 stereo sample per 250 samples (+0.4% rate)
-//   - If buffer drops below 15ms: interpolates/duplicates 1 stereo sample per 250 (-0.4% rate)
-// Eliminates crystal oscillator drift (50-100 ppm) between Host & Guest timers.
+// AdaptiveJitterBuffer.cs - Click-Free Jitter Buffer & Cubic Drift Regulator
+// Supports dynamic 44.1 kHz / 48 kHz / host native WASAPI mix rates:
+//   - Bit-exact 1:1 fast path inside [18..40 ms] deadband when rates match
+//   - 4-point Catmull-Rom cubic Hermite continuous fractional resampling
+//     for both cross-rate conversion (44.1k <-> 48k <-> 96k) and subtle
+//     oscillator drift (+/- 0.04%..0.4%, zero step clicks)
+//   - Exponential decay on underrun + 3 ms soft fade-in on resume (no pops)
 // ============================================================================
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using HvConsole.Host.Protocol;
 
@@ -13,31 +16,55 @@ namespace HvConsole.Host.Audio;
 
 public sealed class AdaptiveJitterBuffer
 {
-    private const int SampleRate = HvProtocolConstants.AudioSampleRate; // 48,000 Hz
-    private const int BytesPerStereoFrame = HvProtocolConstants.AudioBlockAlignStereo16; // 4 bytes (L16 + R16)
-    private const int DriftCadenceFrames = 250; // 1 frame adjustment per 250 frames (0.4%)
+    private const int BytesPerStereo16Frame = HvProtocolConstants.AudioBlockAlignStereo16;
+    private const int CapacityFrames = 16384; // Power of 2 (~341ms @ 48kHz, ~371ms @ 44.1kHz)
+    private const int CapacityMask = CapacityFrames - 1;
 
-    // Buffer Watermarks in Stereo Frames (48 frames = 1 ms)
-    private const int TargetFrames = 25 * 48; // 25 ms = 1,200 stereo frames (4,800 bytes)
-    private const int HighWatermarkFrames = 35 * 48; // 35 ms = 1,680 stereo frames (6,720 bytes)
-    private const int LowWatermarkFrames = 15 * 48;  // 15 ms = 720 stereo frames (2,880 bytes)
-    private const int CapacityFrames = 120 * 48;     // 120 ms max capacity = 5,760 stereo frames
+    private const double PrebufferMs = 22.0;
+    private const double DeadbandLowMs = 18.0;
+    private const double DeadbandHighMs = 40.0;
+    private const double OverflowLimitMs = 140.0;
+    private const double OverflowTrimTargetMs = 32.0;
 
-    private readonly short[] _leftSamples = new short[CapacityFrames];
-    private readonly short[] _rightSamples = new short[CapacityFrames];
+    private readonly float[] _leftSamples = new float[CapacityFrames];
+    private readonly float[] _rightSamples = new float[CapacityFrames];
     private readonly object _lock = new();
 
+    private int _inputSampleRate = HvProtocolConstants.AudioSampleRate;
+    private int _outputSampleRate = HvProtocolConstants.AudioSampleRate;
     private int _readIndex;
     private int _writeIndex;
     private int _bufferedFrames;
-    private int _cadenceCounter;
-    private short _lastLeft;
-    private short _lastRight;
+
+    private double _srcPhase;
+    private float _histL1;
+    private float _histR1;
+    private float _lastOutL;
+    private float _lastOutR;
+    private float _fadeGain;
+    private double _driftSlipAccumulator;
     private bool _prebuffering = true;
+    private bool _guestRenderActive;
 
     public long TotalDroppedFramesForDrift { get; private set; }
     public long TotalDuplicatedFramesForDrift { get; private set; }
     public long TotalUnderruns { get; private set; }
+
+    public int InputSampleRate
+    {
+        get
+        {
+            lock (_lock) return _inputSampleRate;
+        }
+    }
+
+    public int OutputSampleRate
+    {
+        get
+        {
+            lock (_lock) return _outputSampleRate;
+        }
+    }
 
     public double BufferedMilliseconds
     {
@@ -45,8 +72,25 @@ public sealed class AdaptiveJitterBuffer
         {
             lock (_lock)
             {
-                return _bufferedFrames / 48.0;
+                return Math.Max(0.0, (_bufferedFrames - _srcPhase) * 1000.0 / Math.Max(1, _inputSampleRate));
             }
+        }
+    }
+
+    public void SetOutputSampleRate(int outputSampleRate)
+    {
+        if (outputSampleRate <= 0) return;
+        lock (_lock)
+        {
+            _outputSampleRate = outputSampleRate;
+        }
+    }
+
+    public void NotifyGuestRenderState(bool isActive)
+    {
+        lock (_lock)
+        {
+            _guestRenderActive = isActive;
         }
     }
 
@@ -57,7 +101,13 @@ public sealed class AdaptiveJitterBuffer
             _readIndex = 0;
             _writeIndex = 0;
             _bufferedFrames = 0;
-            _cadenceCounter = 0;
+            _srcPhase = 0.0;
+            _histL1 = 0.0f;
+            _histR1 = 0.0f;
+            _lastOutL = 0.0f;
+            _lastOutR = 0.0f;
+            _fadeGain = 0.0f;
+            _driftSlipAccumulator = 0.0;
             _prebuffering = true;
         }
     }
@@ -65,39 +115,70 @@ public sealed class AdaptiveJitterBuffer
     /// <summary>
     /// Pushes interleaved 16-bit stereo PCM bytes from the AF_HYPERV audio socket.
     /// </summary>
-    public void PushInterleavedStereo16(ReadOnlySpan<byte> pcmBytes)
+    public void PushInterleavedStereo16(ReadOnlySpan<byte> pcmBytes, int inputSampleRate = HvProtocolConstants.AudioSampleRate)
     {
-        int frameCount = pcmBytes.Length / BytesPerStereoFrame;
+        int frameCount = pcmBytes.Length / BytesPerStereo16Frame;
         if (frameCount <= 0) return;
 
         ReadOnlySpan<short> samples = MemoryMarshal.Cast<byte, short>(pcmBytes);
+        const float Inv32768 = 1.0f / 32768.0f;
 
         lock (_lock)
         {
-            // If extreme burst arrives (> 80ms), trim oldest frames down to TargetFrames
-            if (_bufferedFrames + frameCount > CapacityFrames)
+            if (inputSampleRate > 0 && inputSampleRate != _inputSampleRate)
             {
-                int drop = (_bufferedFrames + frameCount) - TargetFrames;
+                _inputSampleRate = inputSampleRate;
+                _readIndex = 0;
+                _writeIndex = 0;
+                _bufferedFrames = 0;
+                _srcPhase = 0.0;
+                _histL1 = 0.0f;
+                _histR1 = 0.0f;
+                _fadeGain = 0.0f;
+                _prebuffering = true;
+            }
+
+            int maxAllowedFrames = Math.Min(CapacityFrames, (int)Math.Ceiling(_inputSampleRate * (OverflowLimitMs / 1000.0)));
+            int trimTargetFrames = Math.Max(1, (int)Math.Ceiling(_inputSampleRate * (OverflowTrimTargetMs / 1000.0)));
+
+            if (frameCount > CapacityFrames)
+            {
+                int skip = frameCount - trimTargetFrames;
+                samples = samples.Slice(skip * 2);
+                frameCount = trimTargetFrames;
+                TotalDroppedFramesForDrift += skip;
+            }
+
+            if (_bufferedFrames + frameCount > maxAllowedFrames)
+            {
+                int keepExisting = Math.Max(0, trimTargetFrames - frameCount);
+                int drop = Math.Max(0, _bufferedFrames - keepExisting);
                 if (drop > 0 && drop <= _bufferedFrames)
                 {
-                    _readIndex = (_readIndex + drop) % CapacityFrames;
+                    int lastDroppedIdx = (_readIndex + drop - 1) & CapacityMask;
+                    _histL1 = _leftSamples[lastDroppedIdx];
+                    _histR1 = _rightSamples[lastDroppedIdx];
+                    _readIndex = (_readIndex + drop) & CapacityMask;
                     _bufferedFrames -= drop;
+                    _srcPhase = 0.0;
+                    _fadeGain = Math.Min(_fadeGain, 0.25f);
                     TotalDroppedFramesForDrift += drop;
                 }
             }
 
             for (int i = 0; i < frameCount; i++)
             {
-                _leftSamples[_writeIndex] = samples[i * 2];
-                _rightSamples[_writeIndex] = samples[(i * 2) + 1];
-                _writeIndex = (_writeIndex + 1) % CapacityFrames;
+                _leftSamples[_writeIndex] = samples[i * 2] * Inv32768;
+                _rightSamples[_writeIndex] = samples[(i * 2) + 1] * Inv32768;
+                _writeIndex = (_writeIndex + 1) & CapacityMask;
                 if (_bufferedFrames < CapacityFrames)
                 {
                     _bufferedFrames++;
                 }
             }
 
-            if (_prebuffering && _bufferedFrames >= TargetFrames)
+            int prebufferFrames = Math.Max(1, (int)Math.Round(_inputSampleRate * (PrebufferMs / 1000.0)));
+            if (_prebuffering && _bufferedFrames >= prebufferFrames)
             {
                 _prebuffering = false;
             }
@@ -105,15 +186,36 @@ public sealed class AdaptiveJitterBuffer
     }
 
     /// <summary>
-    /// Pulls interleaved 16-bit stereo PCM frames for WASAPI playback with
-    /// automatic 25ms drift compensation and volume/mute scaling.
+    /// Pulls interleaved 32-bit IEEE Float stereo PCM frames directly for WASAPI playback.
+    /// </summary>
+    public void PullInterleavedFloat32(Span<float> destination, float volume, bool muted)
+    {
+        int requestedFrames = destination.Length / 2;
+        if (requestedFrames <= 0) return;
+
+        PullCore(destination, Span<short>.Empty, requestedFrames, volume, muted);
+    }
+
+    /// <summary>
+    /// Pulls interleaved 16-bit stereo PCM bytes for WASAPI playback.
     /// </summary>
     public void PullInterleavedStereo16(Span<byte> destination, float volume, bool muted)
     {
-        int requestedFrames = destination.Length / BytesPerStereoFrame;
+        int requestedFrames = destination.Length / BytesPerStereo16Frame;
         if (requestedFrames <= 0) return;
 
         Span<short> outSamples = MemoryMarshal.Cast<byte, short>(destination);
+        PullCore(Span<float>.Empty, outSamples, requestedFrames, volume, muted);
+    }
+
+    private void PullCore(
+        Span<float> floatOut,
+        Span<short> shortOut,
+        int requestedFrames,
+        float volume,
+        bool muted)
+    {
+        bool writeFloat = !floatOut.IsEmpty;
         float effectiveGain = muted ? 0.0f : Math.Clamp(volume, 0.0f, 1.0f);
 
         lock (_lock)
@@ -123,79 +225,179 @@ public sealed class AdaptiveJitterBuffer
                 if (_bufferedFrames == 0 && !_prebuffering)
                 {
                     _prebuffering = true;
-                    TotalUnderruns++;
+                    _fadeGain = 0.0f;
+                    if (_guestRenderActive)
+                    {
+                        TotalUnderruns++;
+                    }
                 }
-                destination.Clear();
+
+                FillDecaySilence(floatOut, shortOut, writeFloat, 0, requestedFrames, effectiveGain);
                 return;
             }
+
+            double bufferedMs = Math.Max(0.0, (_bufferedFrames - _srcPhase) * 1000.0 / Math.Max(1, _inputSampleRate));
+            double baseStep = (double)_inputSampleRate / Math.Max(1, _outputSampleRate);
+
+            double driftFactor = 0.0;
+            if (bufferedMs > DeadbandHighMs)
+            {
+                driftFactor = Math.Min(0.004, 0.0004 + (bufferedMs - DeadbandHighMs) * 0.00005);
+            }
+            else if (bufferedMs < DeadbandLowMs)
+            {
+                driftFactor = -Math.Min(0.004, 0.0004 + (DeadbandLowMs - bufferedMs) * 0.00005);
+            }
+
+            double step = baseStep * (1.0 + driftFactor);
+            float fadeStep = 1.0f / Math.Max(1.0f, _outputSampleRate * 0.003f); // 3 ms linear fade-in
+            bool exactOneToOne = Math.Abs(step - 1.0) < 1e-9 && _srcPhase < 1e-7;
+            int activeFramesProduced = 0;
 
             for (int outIdx = 0; outIdx < requestedFrames; outIdx++)
             {
                 if (_bufferedFrames == 0)
                 {
-                    _prebuffering = true;
-                    TotalUnderruns++;
-                    outSamples[outIdx * 2] = 0;
-                    outSamples[(outIdx * 2) + 1] = 0;
-                    continue;
+                    if (!_prebuffering)
+                    {
+                        _prebuffering = true;
+                        _fadeGain = 0.0f;
+                        if (_guestRenderActive)
+                        {
+                            TotalUnderruns++;
+                        }
+                    }
+
+                    FillDecaySilence(floatOut, shortOut, writeFloat, outIdx, requestedFrames, effectiveGain);
+                    break;
                 }
 
-                _cadenceCounter++;
+                float sampleL;
+                float sampleR;
 
-                // 1. High-Watermark Drift Compensation (> 35 ms):
-                // Skip 1 stereo sample every 250 samples to gently drain excess latency back to 25 ms
-                if (_bufferedFrames > HighWatermarkFrames && _cadenceCounter >= DriftCadenceFrames && _bufferedFrames >= 2)
+                if (exactOneToOne)
                 {
-                    _cadenceCounter = 0;
-                    _readIndex = (_readIndex + 1) % CapacityFrames;
+                    sampleL = _leftSamples[_readIndex];
+                    sampleR = _rightSamples[_readIndex];
+                    _histL1 = sampleL;
+                    _histR1 = sampleR;
+                    _readIndex = (_readIndex + 1) & CapacityMask;
                     _bufferedFrames--;
-                    TotalDroppedFramesForDrift++;
                 }
-
-                // 2. Low-Watermark Drift Compensation (< 15 ms):
-                // Duplicate/interpolate 1 stereo sample every 250 samples to prevent buffer underrun
-                if (_bufferedFrames < LowWatermarkFrames && _cadenceCounter >= DriftCadenceFrames)
+                else
                 {
-                    _cadenceCounter = 0;
-                    short nextL = _leftSamples[_readIndex];
-                    short nextR = _rightSamples[_readIndex];
-                    short interpL = (short)((_lastLeft + nextL) / 2);
-                    short interpR = (short)((_lastRight + nextR) / 2);
+                    int i1 = _readIndex;
+                    int i2 = (_bufferedFrames >= 2) ? ((_readIndex + 1) & CapacityMask) : i1;
+                    int i3 = (_bufferedFrames >= 3) ? ((_readIndex + 2) & CapacityMask) : i2;
 
-                    WriteScaledSample(outSamples, outIdx, interpL, interpR, effectiveGain);
-                    TotalDuplicatedFramesForDrift++;
-                    continue;
+                    float t = (float)_srcPhase;
+                    sampleL = CatmullRom(_histL1, _leftSamples[i1], _leftSamples[i2], _leftSamples[i3], t);
+                    sampleR = CatmullRom(_histR1, _rightSamples[i1], _rightSamples[i2], _rightSamples[i3], t);
+
+                    _srcPhase += step;
+                    while (_srcPhase >= 1.0 && _bufferedFrames > 0)
+                    {
+                        _histL1 = _leftSamples[_readIndex];
+                        _histR1 = _rightSamples[_readIndex];
+                        _readIndex = (_readIndex + 1) & CapacityMask;
+                        _bufferedFrames--;
+                        _srcPhase -= 1.0;
+                    }
+
+                    if (_bufferedFrames == 0 && _srcPhase > 0.0)
+                    {
+                        _srcPhase = 0.0;
+                    }
                 }
 
-                short curL = _leftSamples[_readIndex];
-                short curR = _rightSamples[_readIndex];
-                _readIndex = (_readIndex + 1) % CapacityFrames;
-                _bufferedFrames--;
+                activeFramesProduced++;
 
-                _lastLeft = curL;
-                _lastRight = curR;
+                if (_fadeGain < 1.0f)
+                {
+                    _fadeGain = Math.Min(1.0f, _fadeGain + fadeStep);
+                }
 
-                WriteScaledSample(outSamples, outIdx, curL, curR, effectiveGain);
+                float shapedL = sampleL * _fadeGain;
+                float shapedR = sampleR * _fadeGain;
+                _lastOutL = shapedL;
+                _lastOutR = shapedR;
+
+                WriteScaledOutput(floatOut, shortOut, writeFloat, outIdx, shapedL, shapedR, effectiveGain);
+            }
+
+            if (activeFramesProduced > 0 && Math.Abs(step - baseStep) > 1e-9)
+            {
+                _driftSlipAccumulator += (step - baseStep) * activeFramesProduced;
+                if (_driftSlipAccumulator >= 1.0)
+                {
+                    long dropped = (long)_driftSlipAccumulator;
+                    TotalDroppedFramesForDrift += dropped;
+                    _driftSlipAccumulator -= dropped;
+                }
+                else if (_driftSlipAccumulator <= -1.0)
+                {
+                    long duplicated = (long)(-_driftSlipAccumulator);
+                    TotalDuplicatedFramesForDrift += duplicated;
+                    _driftSlipAccumulator += duplicated;
+                }
             }
         }
     }
 
-    private static void WriteScaledSample(Span<short> outSamples, int frameIdx, short left, short right, float gain)
+    private void FillDecaySilence(
+        Span<float> floatOut,
+        Span<short> shortOut,
+        bool writeFloat,
+        int startFrame,
+        int endFrame,
+        float gain)
     {
-        if (gain <= 0.0001f)
+        for (int i = startFrame; i < endFrame; i++)
         {
-            outSamples[frameIdx * 2] = 0;
-            outSamples[(frameIdx * 2) + 1] = 0;
+            _lastOutL *= 0.985f;
+            _lastOutR *= 0.985f;
+            if (MathF.Abs(_lastOutL) < 1e-6f) _lastOutL = 0.0f;
+            if (MathF.Abs(_lastOutR) < 1e-6f) _lastOutR = 0.0f;
+            WriteScaledOutput(floatOut, shortOut, writeFloat, i, _lastOutL, _lastOutR, gain);
         }
-        else if (gain >= 0.999f)
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteScaledOutput(
+        Span<float> floatOut,
+        Span<short> shortOut,
+        bool writeFloat,
+        int frameIdx,
+        float left,
+        float right,
+        float gain)
+    {
+        float outL = Math.Clamp(left * gain, -1.0f, 1.0f);
+        float outR = Math.Clamp(right * gain, -1.0f, 1.0f);
+
+        int baseIdx = frameIdx * 2;
+        if (writeFloat)
         {
-            outSamples[frameIdx * 2] = left;
-            outSamples[(frameIdx * 2) + 1] = right;
+            floatOut[baseIdx] = outL;
+            floatOut[baseIdx + 1] = outR;
         }
         else
         {
-            outSamples[frameIdx * 2] = (short)Math.Clamp((int)(left * gain), short.MinValue, short.MaxValue);
-            outSamples[(frameIdx * 2) + 1] = (short)Math.Clamp((int)(right * gain), short.MinValue, short.MaxValue);
+            shortOut[baseIdx] = (short)Math.Clamp((int)MathF.Round(outL * 32767.0f), short.MinValue, short.MaxValue);
+            shortOut[baseIdx + 1] = (short)Math.Clamp((int)MathF.Round(outR * 32767.0f), short.MinValue, short.MaxValue);
         }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float CatmullRom(float y0, float y1, float y2, float y3, float t)
+    {
+        float t2 = t * t;
+        float t3 = t2 * t;
+        return 0.5f * (
+            (2.0f * y1) +
+            (-y0 + y2) * t +
+            (2.0f * y0 - 5.0f * y1 + 4.0f * y2 - y3) * t2 +
+            (-y0 + 3.0f * y1 - 3.0f * y2 + y3) * t3
+        );
     }
 }

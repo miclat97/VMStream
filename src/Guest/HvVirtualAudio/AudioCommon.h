@@ -115,6 +115,12 @@ public:
             return 0;
         }
 
+        // Round length down to whole stereo 16-bit frames (4 bytes) to prevent channel swap on wrap/overflow
+        Length &= ~(HV_AUDIO_BLOCK_ALIGN_STEREO_16 - 1u);
+        if (Length == 0) {
+            return 0;
+        }
+
         KIRQL oldIrql;
         KeAcquireSpinLock(&m_Lock, &oldIrql);
 
@@ -123,10 +129,14 @@ public:
             Length = HV_AUDIO_RING_BUFFER_SIZE;
         }
 
-        // If writing exceeds remaining space, advance ReadIndex to drop oldest samples
+        // If writing exceeds remaining space, advance ReadIndex to drop oldest whole frames
         ULONG freeSpace = HV_AUDIO_RING_BUFFER_SIZE - m_AvailableBytes;
         if (Length > freeSpace) {
             ULONG dropBytes = (Length - freeSpace);
+            dropBytes = (dropBytes + (HV_AUDIO_BLOCK_ALIGN_STEREO_16 - 1u)) & ~(HV_AUDIO_BLOCK_ALIGN_STEREO_16 - 1u);
+            if (dropBytes > m_AvailableBytes) {
+                dropBytes = m_AvailableBytes;
+            }
             m_ReadIndex = (m_ReadIndex + dropBytes) % HV_AUDIO_RING_BUFFER_SIZE;
             m_AvailableBytes -= dropBytes;
         }
@@ -144,9 +154,14 @@ public:
         return Length;
     }
 
-    // Reads up to Length bytes from the circular buffer
+    // Reads up to Length bytes (aligned to stereo 16-bit frames) from the circular buffer
     ULONG Read(_Out_writes_bytes_(Length) UCHAR* Destination, _In_ ULONG Length) {
         if (Destination == NULL || Length == 0) {
+            return 0;
+        }
+
+        Length &= ~(HV_AUDIO_BLOCK_ALIGN_STEREO_16 - 1u);
+        if (Length == 0) {
             return 0;
         }
 
@@ -154,6 +169,7 @@ public:
         KeAcquireSpinLock(&m_Lock, &oldIrql);
 
         ULONG toRead = min(Length, m_AvailableBytes);
+        toRead &= ~(HV_AUDIO_BLOCK_ALIGN_STEREO_16 - 1u);
         if (toRead > 0) {
             ULONG firstChunk = min(toRead, HV_AUDIO_RING_BUFFER_SIZE - m_ReadIndex);
             RtlCopyMemory(Destination, &m_Data[m_ReadIndex], firstChunk);
@@ -194,8 +210,12 @@ DECLARE_INTERFACE_(IHvAudioAdapterCommon, IUnknown) {
 
     STDMETHOD_(void, SetRenderState)(THIS_ _In_ BOOLEAN IsRunning) PURE;
     STDMETHOD_(void, SetCaptureState)(THIS_ _In_ BOOLEAN IsRunning) PURE;
+    STDMETHOD_(void, SetRenderFormat)(THIS_ _In_ ULONG SampleRate) PURE;
+    STDMETHOD_(void, SetCaptureFormat)(THIS_ _In_ ULONG SampleRate) PURE;
     STDMETHOD_(BOOLEAN, IsRenderRunning)(THIS) PURE;
     STDMETHOD_(BOOLEAN, IsCaptureRunning)(THIS) PURE;
+    STDMETHOD_(ULONG, GetRenderSampleRate)(THIS) PURE;
+    STDMETHOD_(ULONG, GetCaptureSampleRate)(THIS) PURE;
 
     STDMETHOD_(ULONG, PushRenderPcmFromWaveRT)(
         THIS_

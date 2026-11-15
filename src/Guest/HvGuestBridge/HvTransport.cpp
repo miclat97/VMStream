@@ -4,6 +4,9 @@
 // ============================================================================
 #include "HvTransport.h"
 
+#include <cstring>
+#include <vector>
+
 #pragma comment(lib, "ws2_32.lib")
 
 HvSocketTransport::HvSocketTransport(
@@ -179,6 +182,11 @@ bool HvSocketTransport::TryConnectTcpFallback(DWORD timeoutMs)
     nonBlocking = 0;
     ioctlsocket(sock, FIONBIO, &nonBlocking);
 
+    int sendBuf = 65536;
+    int recvBuf = 65536;
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf), sizeof(recvBuf));
+
     m_Socket.store(sock, std::memory_order_release);
     return true;
 }
@@ -239,28 +247,34 @@ bool HvSocketTransport::SendPacket(
 {
     std::lock_guard<std::mutex> lock(m_SendMutex);
 
+    const uint32_t totalPayload = static_cast<uint32_t>(payloadLength) + static_cast<uint32_t>(extraLength);
+    if (totalPayload > 0xFFFFu) {
+        return false;
+    }
+
     HV_PACKET_HEADER hdr{};
     hdr.Magic = HV_PACKET_MAGIC;
     hdr.Version = HV_PROTOCOL_VERSION;
     hdr.Type = static_cast<uint8_t>(type);
-    hdr.PayloadLength = static_cast<uint16_t>(payloadLength + extraLength);
+    hdr.PayloadLength = static_cast<uint16_t>(totalPayload);
     hdr.Sequence = ++m_SendSequence;
 
-    if (!SendExact(&hdr, sizeof(hdr))) {
-        return false;
+    const size_t totalPacketSize = sizeof(hdr) + totalPayload;
+    uint8_t stackBuf[4096];
+    std::vector<uint8_t> heapBuf;
+    uint8_t* dst = stackBuf;
+    if (totalPacketSize > sizeof(stackBuf)) {
+        heapBuf.resize(totalPacketSize);
+        dst = heapBuf.data();
     }
 
+    std::memcpy(dst, &hdr, sizeof(hdr));
     if (payload != nullptr && payloadLength > 0) {
-        if (!SendExact(payload, payloadLength)) {
-            return false;
-        }
+        std::memcpy(dst + sizeof(hdr), payload, payloadLength);
     }
-
     if (extraPayload != nullptr && extraLength > 0) {
-        if (!SendExact(extraPayload, extraLength)) {
-            return false;
-        }
+        std::memcpy(dst + sizeof(hdr) + payloadLength, extraPayload, extraLength);
     }
 
-    return true;
+    return SendExact(dst, totalPacketSize);
 }

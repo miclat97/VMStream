@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using HvConsole.Host.Audio;
 using HvConsole.Host.Wmi;
 
 namespace HvConsole.Host.UI;
@@ -19,13 +20,17 @@ public sealed class VmPickerForm : Form
     private readonly Label _lblStatus;
     private readonly CheckBox _chkStartFullscreen;
     private readonly CheckBox _chkTcpFallback;
+    private readonly ComboBox _cmbSampleRate;
     private readonly Button _btnConnect;
     private readonly Button _btnStartVm;
     private readonly Button _btnRefresh;
 
     private IReadOnlyList<HyperVVmInfo> _discoveredVms = Array.Empty<HyperVVmInfo>();
 
-    public VmPickerForm(bool defaultFullscreen = false, bool defaultTcpFallback = false)
+    public VmPickerForm(
+        bool defaultFullscreen = false,
+        bool defaultTcpFallback = false,
+        AudioSampleRatePreference? initialSampleRate = null)
     {
         Text = "VMStream - Zero-Artifact Hyper-V Console Client";
         Size = new Size(920, 560);
@@ -54,7 +59,7 @@ public sealed class VmPickerForm : Form
 
         var lblSubtitle = new Label
         {
-            Text = "Strict Console Session (Port 2179 / GPU-PV)  \u2022  AF_HYPERV 48 kHz WaveRT Audio  \u2022  10-Point VHF Multi-Touch Digitizer",
+            Text = "Strict Console Session (Port 2179 / GPU-PV)  \u2022  AF_HYPERV 44.1 / 48 kHz WaveRT Audio  \u2022  10-Point VHF Multi-Touch Digitizer",
             Font = new Font("Segoe UI", 9.0f),
             ForeColor = Color.FromArgb(148, 163, 184),
             AutoSize = true,
@@ -91,7 +96,7 @@ public sealed class VmPickerForm : Form
         var bottomPanel = new Panel
         {
             Dock = DockStyle.Bottom,
-            Height = 92,
+            Height = 98,
             BackColor = Color.FromArgb(10, 15, 29)
         };
 
@@ -101,7 +106,7 @@ public sealed class VmPickerForm : Form
             Checked = defaultFullscreen,
             ForeColor = Color.FromArgb(203, 213, 225),
             AutoSize = true,
-            Location = new Point(22, 14)
+            Location = new Point(22, 12)
         };
 
         _chkTcpFallback = new CheckBox
@@ -110,15 +115,48 @@ public sealed class VmPickerForm : Form
             Checked = defaultTcpFallback,
             ForeColor = Color.FromArgb(148, 163, 184),
             AutoSize = true,
-            Location = new Point(380, 14)
+            Location = new Point(365, 12)
         };
+
+        var lblAudioRate = new Label
+        {
+            Text = "Audio:",
+            ForeColor = Color.FromArgb(148, 163, 184),
+            AutoSize = true,
+            Location = new Point(522, 13)
+        };
+
+        AudioSampleRatePreference effectiveRate = initialSampleRate ?? AudioRateSettings.LoadSavedPreference();
+        _cmbSampleRate = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9.0f),
+            BackColor = Color.FromArgb(30, 41, 59),
+            ForeColor = Color.FromArgb(241, 245, 249),
+            Location = new Point(572, 9),
+            Size = new Size(192, 25)
+        };
+        _cmbSampleRate.Items.AddRange(new object[]
+        {
+            AudioRateSettings.FormatDisplay(AudioSampleRatePreference.Auto),
+            AudioRateSettings.FormatDisplay(AudioSampleRatePreference.Hz44100),
+            AudioRateSettings.FormatDisplay(AudioSampleRatePreference.Hz48000)
+        });
+        _cmbSampleRate.SelectedIndex = effectiveRate switch
+        {
+            AudioSampleRatePreference.Hz44100 => 1,
+            AudioSampleRatePreference.Hz48000 => 2,
+            _ => 0
+        };
+        _cmbSampleRate.SelectedIndexChanged += (_, _) => AudioRateSettings.SavePreference(GetSelectedSampleRate());
 
         _lblStatus = new Label
         {
             Text = "Ready.",
             ForeColor = Color.FromArgb(148, 163, 184),
             AutoSize = false,
-            Location = new Point(22, 48),
+            Location = new Point(22, 52),
             Size = new Size(440, 28),
             TextAlign = ContentAlignment.MiddleLeft
         };
@@ -131,7 +169,7 @@ public sealed class VmPickerForm : Form
             ForeColor = Color.FromArgb(226, 232, 240),
             Size = new Size(110, 38),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
-            Location = new Point(510, 36)
+            Location = new Point(510, 44)
         };
         _btnRefresh.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
         _btnRefresh.Click += (_, _) => RefreshVmList();
@@ -144,7 +182,7 @@ public sealed class VmPickerForm : Form
             ForeColor = Color.FromArgb(226, 232, 240),
             Size = new Size(120, 38),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
-            Location = new Point(630, 36),
+            Location = new Point(630, 44),
             Enabled = false
         };
         _btnStartVm.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
@@ -159,7 +197,7 @@ public sealed class VmPickerForm : Form
             ForeColor = Color.White,
             Size = new Size(140, 38),
             Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
-            Location = new Point(760, 36),
+            Location = new Point(760, 44),
             Enabled = false
         };
         _btnConnect.FlatAppearance.BorderColor = Color.FromArgb(56, 189, 248);
@@ -169,6 +207,8 @@ public sealed class VmPickerForm : Form
         {
             _chkStartFullscreen,
             _chkTcpFallback,
+            lblAudioRate,
+            _cmbSampleRate,
             _lblStatus,
             _btnRefresh,
             _btnStartVm,
@@ -244,6 +284,13 @@ public sealed class VmPickerForm : Form
         }
     }
 
+    private AudioSampleRatePreference GetSelectedSampleRate() => _cmbSampleRate.SelectedIndex switch
+    {
+        1 => AudioSampleRatePreference.Hz44100,
+        2 => AudioSampleRatePreference.Hz48000,
+        _ => AudioSampleRatePreference.Auto
+    };
+
     private HyperVVmInfo? GetSelectedVm()
     {
         if (_vmListView.SelectedItems.Count == 0) return null;
@@ -309,7 +356,8 @@ public sealed class VmPickerForm : Form
         var sessionForm = new ConsoleSessionForm(
             vm,
             startInFullscreen: _chkStartFullscreen.Checked,
-            forceTcpFallback: _chkTcpFallback.Checked
+            forceTcpFallback: _chkTcpFallback.Checked,
+            sampleRatePreference: GetSelectedSampleRate()
         );
         sessionForm.Show();
     }

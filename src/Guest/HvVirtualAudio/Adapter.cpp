@@ -8,13 +8,6 @@
 #include "WaveRTMiniport.h"
 #include <wdmsec.h>
 
-void __cdecl operator delete(PVOID pVoid, size_t /*cbSize*/) noexcept
-{
-    if (pVoid != NULL) {
-        ExFreePool(pVoid);
-    }
-}
-
 class CAdapterCommon;
 
 static PDEVICE_OBJECT   g_AudioControlDeviceObject = NULL;

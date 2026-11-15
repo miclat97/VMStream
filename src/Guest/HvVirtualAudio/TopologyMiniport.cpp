@@ -470,7 +470,7 @@ CMiniportTopologyHvAudio::PropertyHandlerJackDescription(
         jack->ChannelMapping = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT;
         jack->Color = 0x00000000;
         jack->ConnectionType = eConnTypeOtherDigital;
-        jack->GeoLocation = eGeoLocVirtual;
+        jack->GeoLocation = eGeoLocNotApplicable;
         jack->GenLocation = eGenLocInternal;
         jack->PortConnection = ePortConnIntegratedDevice;
         jack->IsConnected = TRUE;

@@ -141,7 +141,8 @@ HvTouchCreateControlDevice(
     }
 
     // Allow LocalSystem and Administrators full access to \\.\HvTouchHid
-    DECLARE_CONST_UNICODE_STRING(sddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
+    UNICODE_STRING sddl;
+    RtlInitUnicodeString(&sddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
     PWDFDEVICE_INIT controlInit = WdfControlDeviceInitAllocate(Driver, &sddl);
     if (controlInit == NULL) {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -149,7 +150,8 @@ HvTouchCreateControlDevice(
 
     WdfDeviceInitSetExclusive(controlInit, FALSE);
 
-    DECLARE_CONST_UNICODE_STRING(ntDeviceName, HVTOUCH_NT_DEVICE_NAME);
+    UNICODE_STRING ntDeviceName;
+    RtlInitUnicodeString(&ntDeviceName, HVTOUCH_NT_DEVICE_NAME);
     NTSTATUS status = WdfDeviceInitAssignName(controlInit, &ntDeviceName);
     if (!NT_SUCCESS(status)) {
         WdfDeviceInitFree(controlInit);
@@ -168,7 +170,8 @@ HvTouchCreateControlDevice(
         return status;
     }
 
-    DECLARE_CONST_UNICODE_STRING(symbolicLinkName, HVTOUCH_DOS_DEVICE_NAME);
+    UNICODE_STRING symbolicLinkName;
+    RtlInitUnicodeString(&symbolicLinkName, HVTOUCH_DOS_DEVICE_NAME);
     status = WdfDeviceCreateSymbolicLink(controlDevice, &symbolicLinkName);
     if (!NT_SUCCESS(status)) {
         WdfObjectDelete(controlDevice);

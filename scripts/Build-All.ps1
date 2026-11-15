@@ -219,7 +219,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
         $ClTouchRsp = Join-Path $TouchObjDir "cl_touch.rsp"
         [string[]]$ClTouchLines = @(
             "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/Zc:sizedDealloc-", "/kernel", "/GS", "/O2", "/std:c++20",
-            "/D_WIN64", "/D_AMD64_", "/DAMD64", "/D_KERNEL_MODE", "/DPOOL_NX_OPTIN=1",
+            "/D_WIN64", "/D_AMD64_", "/DAMD64", "/DPOOL_NX_OPTIN=1",
             "/DKMDF_VERSION_MAJOR=1", "/DKMDF_VERSION_MINOR=$KmdfMinor",
             "/I`"$TouchSrcDir`"",
             "/I`"$ShdDir`"",
@@ -292,7 +292,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
         $ClAudioRsp = Join-Path $AudioObjDir "cl_audio.rsp"
         [string[]]$ClAudioLines = @(
             "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/Zc:sizedDealloc-", "/kernel", "/GS", "/O2", "/std:c++20",
-            "/D_WIN64", "/D_AMD64_", "/DAMD64", "/D_KERNEL_MODE", "/DPOOL_NX_OPTIN=1",
+            "/D_WIN64", "/D_AMD64_", "/DAMD64", "/DPOOL_NX_OPTIN=1",
             "/I`"$AudioSrcDir`"",
             "/I`"$ShdDir`"",
             "/I`"$WdkKmInc`"",

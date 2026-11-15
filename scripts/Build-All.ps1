@@ -12,9 +12,9 @@
     3. Compiles src\Guest\HvGuestBridge\HvGuestBridge.vcxproj via MSBuild (with a direct
        MSVC cl.exe + link.exe response-file fallback).
     4. Compiles src\Guest\HvTouchHid (KMDF + VHF) and src\Guest\HvVirtualAudio (PortCls WaveRT)
-       via MSBuild (with a direct MSVC /kernel cl.exe + link.exe /DRIVER response-file fallback
-       against WDK headers and libraries so drivers build cleanly even on standalone BuildTools).
-    5. Stages compiled Host and Guest deployment bundles into build\dist\Host and build\dist\Guest.
+       via MSBuild or direct MSVC /kernel cl.exe + link.exe /DRIVER against WDK headers and libs.
+    5. Test-signs HvTouchHid.sys and HvVirtualAudio.sys and stages Host and Guest deployment
+       bundles into build\dist\Host and build\dist\Guest.
 #>
 [CmdletBinding()]
 param(
@@ -57,6 +57,12 @@ if (-not $SkipPrerequisites -and (Test-Path $PrereqScript)) {
         SdkVersion   = $null
         WdkVersion   = $null
         KmdfVersion  = "1.31"
+        WdkKmInc     = $null
+        WdkKmCrtInc  = $null
+        WdkSharedInc = $null
+        WdkKmLib     = $null
+        KmdfInc      = $null
+        KmdfLib      = $null
     }
 }
 
@@ -155,6 +161,10 @@ if (-not $BridgeBuilt -and $Toolchain.ClExe -and $Toolchain.SdkVersion) {
         "ws2_32.lib"
         "advapi32.lib"
         "user32.lib"
+        "setupapi.lib"
+        "newdev.lib"
+        "ole32.lib"
+        "winmm.lib"
         "kernel32.lib"
     )
     [System.IO.File]::WriteAllLines($RspFile, $RspContent)
@@ -175,19 +185,21 @@ Write-Host "      -> Built and staged: $DistGuest\HvGuestBridge.exe" -Foreground
 # ============================================================================
 # 3 & 4. Build WDK Drivers (HvTouchHid.sys & HvVirtualAudio.sys)
 # ============================================================================
-if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
-    $WdkInc  = Join-Path $Toolchain.KitsRoot "Include\$($Toolchain.WdkVersion)"
-    $WdkLib  = Join-Path $Toolchain.KitsRoot "Lib\$($Toolchain.WdkVersion)"
-    $KmdfInc = Join-Path $Toolchain.KitsRoot "Include\wdf\kmdf\$($Toolchain.KmdfVersion)"
-    $KmdfLib = Join-Path $Toolchain.KitsRoot "Lib\wdf\kmdf\x64\$($Toolchain.KmdfVersion)"
-    $MsvcInc = Join-Path $Toolchain.MsvcRoot "include"
-    $MsvcLib = Join-Path $Toolchain.MsvcRoot "lib\x64"
-    $ShdDir  = Join-Path $RepoRoot "src\Shared"
+if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
+    $WdkKmInc     = $Toolchain.WdkKmInc
+    $WdkKmCrtInc  = $Toolchain.WdkKmCrtInc
+    $WdkSharedInc = $Toolchain.WdkSharedInc
+    $WdkKmLib     = $Toolchain.WdkKmLib
+    $KmdfInc      = $Toolchain.KmdfInc
+    $KmdfLib      = $Toolchain.KmdfLib
+    $MsvcInc      = Join-Path $Toolchain.MsvcRoot "include"
+    $MsvcLib      = Join-Path $Toolchain.MsvcRoot "lib\x64"
+    $ShdDir       = Join-Path $RepoRoot "src\Shared"
+    $SysSdkInc    = Join-Path $Toolchain.KitsRoot "Include\$($Toolchain.SdkVersion)"
 
     # ------------------------------------------------------------------------
     # 3. HvTouchHid.sys (KMDF + Virtual HID Framework VHF)
     # ------------------------------------------------------------------------
-    $TouchProj   = Join-Path $RepoRoot "src\Guest\HvTouchHid\HvTouchHid.vcxproj"
     $TouchBinDir = Join-Path $RepoRoot "build\bin\$Configuration\HvTouchHid"
     $TouchObjDir = Join-Path $RepoRoot "build\obj\$Configuration\HvTouchHid"
     New-Item -ItemType Directory -Path $TouchBinDir -Force | Out-Null
@@ -195,39 +207,26 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
 
     Write-Host "`n[3/4] Building WDK Multi-Touch VHF Driver (HvTouchHid.sys)..." -ForegroundColor Yellow
 
-    $TouchBuilt = $false
-    if ($Toolchain.MsBuildExe) {
-        try {
-            & $Toolchain.MsBuildExe $TouchProj `
-                /p:Configuration=$Configuration `
-                /p:Platform=x64 `
-                /p:SolutionDir="$RepoRoot\" `
-                /p:SignMode=Off `
-                /p:SpectreMitigation=false `
-                /m /v:minimal 2>$null
-            if ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $TouchBinDir "HvTouchHid.sys"))) {
-                $TouchBuilt = $true
-            }
-        } catch { }
-    }
+    $TouchBuilt  = $false
+    $TouchSrcDir = Join-Path $RepoRoot "src\Guest\HvTouchHid"
+    $TouchObj    = Join-Path $TouchObjDir "Driver.obj"
+    $TouchSys    = Join-Path $TouchBinDir "HvTouchHid.sys"
+    $KmdfMinor   = ($Toolchain.KmdfVersion -split '\.')[1]
 
-    if (-not $TouchBuilt -and $Toolchain.ClExe -and $Toolchain.LinkExe) {
-        Write-Host "      -> Invoking direct WDK Kernel Compiler (cl.exe /kernel) for HvTouchHid.sys..." -ForegroundColor Cyan
-        $TouchSrcDir = Join-Path $RepoRoot "src\Guest\HvTouchHid"
-        $TouchObj    = Join-Path $TouchObjDir "Driver.obj"
-        $TouchSys    = Join-Path $TouchBinDir "HvTouchHid.sys"
-        $KmdfMinor   = ($Toolchain.KmdfVersion -split '\.')[1]
+    if ($Toolchain.ClExe -and $Toolchain.LinkExe) {
+        Write-Host "      -> Compiling HvTouchHid.sys with MSVC Kernel Compiler (cl.exe /kernel)..." -ForegroundColor Cyan
 
         $ClTouchRsp = Join-Path $TouchObjDir "cl_touch.rsp"
         [string[]]$ClTouchLines = @(
-            "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/kernel", "/GS", "/O2", "/std:c++20",
+            "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/Zc:sizedDealloc-", "/kernel", "/GS", "/O2", "/std:c++20",
             "/D_WIN64", "/D_AMD64_", "/DAMD64", "/D_KERNEL_MODE", "/DPOOL_NX_OPTIN=1",
             "/DKMDF_VERSION_MAJOR=1", "/DKMDF_VERSION_MINOR=$KmdfMinor",
             "/I`"$TouchSrcDir`"",
             "/I`"$ShdDir`"",
-            "/I`"$(Join-Path $WdkInc 'km')`"",
-            "/I`"$(Join-Path $WdkInc 'shared')`"",
-            "/I`"$(Join-Path $WdkInc 'km\crt')`"",
+            "/I`"$WdkKmInc`"",
+            "/I`"$WdkSharedInc`"",
+            "/I`"$WdkKmCrtInc`"",
+            "/I`"$(Join-Path $SysSdkInc 'shared')`"",
             "/I`"$KmdfInc`"",
             "/I`"$MsvcInc`"",
             "/Fo`"$TouchObj`"",
@@ -242,7 +241,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
                 "/NOLOGO", "/DRIVER", "/SUBSYSTEM:NATIVE", "/NODEFAULTLIB", "/INCREMENTAL:NO",
                 "/OPT:REF", "/OPT:ICF", "/RELEASE", "/ENTRY:FxDriverEntry",
                 "/MERGE:_TEXT=.text;_PAGE=PAGE",
-                "/LIBPATH:`"$(Join-Path $WdkLib 'km\x64')`"",
+                "/LIBPATH:`"$WdkKmLib`"",
                 "/LIBPATH:`"$KmdfLib`"",
                 "/LIBPATH:`"$MsvcLib`"",
                 "/OUT:`"$TouchSys`"",
@@ -264,14 +263,18 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
 
     $TouchOut = Join-Path $DistGuest "HvTouchHid"
     New-Item -ItemType Directory -Path $TouchOut -Force | Out-Null
-    Copy-Item -Path (Join-Path $RepoRoot "src\Guest\HvTouchHid\HvTouchHid.inf") -Destination $TouchOut -Force
-    Copy-Item -Path (Join-Path $TouchBinDir "HvTouchHid.sys") -Destination $TouchOut -Force
+    $TouchInfDest = Join-Path $TouchOut "HvTouchHid.inf"
+    Copy-Item -Path (Join-Path $RepoRoot "src\Guest\HvTouchHid\HvTouchHid.inf") -Destination $TouchInfDest -Force
+    # Ensure KmdfLibraryVersion in staged INF matches the linked KMDF version
+    $infText = [System.IO.File]::ReadAllText($TouchInfDest)
+    $infText = $infText -replace 'KmdfLibraryVersion\s*=\s*\d+\.\d+', "KmdfLibraryVersion = $($Toolchain.KmdfVersion)"
+    [System.IO.File]::WriteAllText($TouchInfDest, $infText)
+    Copy-Item -Path $TouchSys -Destination $TouchOut -Force
     Write-Host "      -> Built and staged: $TouchOut\HvTouchHid.sys" -ForegroundColor Green
 
     # ------------------------------------------------------------------------
     # 4. HvVirtualAudio.sys (PortCls / WaveRT Virtual Audio Driver)
     # ------------------------------------------------------------------------
-    $AudioProj   = Join-Path $RepoRoot "src\Guest\HvVirtualAudio\HvVirtualAudio.vcxproj"
     $AudioBinDir = Join-Path $RepoRoot "build\bin\$Configuration\HvVirtualAudio"
     $AudioObjDir = Join-Path $RepoRoot "build\obj\$Configuration\HvVirtualAudio"
     New-Item -ItemType Directory -Path $AudioBinDir -Force | Out-Null
@@ -279,36 +282,23 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
 
     Write-Host "`n[4/4] Building WDK PortCls/WaveRT Virtual Audio Driver (HvVirtualAudio.sys)..." -ForegroundColor Yellow
 
-    $AudioBuilt = $false
-    if ($Toolchain.MsBuildExe) {
-        try {
-            & $Toolchain.MsBuildExe $AudioProj `
-                /p:Configuration=$Configuration `
-                /p:Platform=x64 `
-                /p:SolutionDir="$RepoRoot\" `
-                /p:SignMode=Off `
-                /p:SpectreMitigation=false `
-                /m /v:minimal 2>$null
-            if ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $AudioBinDir "HvVirtualAudio.sys"))) {
-                $AudioBuilt = $true
-            }
-        } catch { }
-    }
+    $AudioBuilt  = $false
+    $AudioSrcDir = Join-Path $RepoRoot "src\Guest\HvVirtualAudio"
+    $AudioSys    = Join-Path $AudioBinDir "HvVirtualAudio.sys"
 
-    if (-not $AudioBuilt -and $Toolchain.ClExe -and $Toolchain.LinkExe) {
-        Write-Host "      -> Invoking direct WDK Kernel Compiler (cl.exe /kernel) for HvVirtualAudio.sys..." -ForegroundColor Cyan
-        $AudioSrcDir = Join-Path $RepoRoot "src\Guest\HvVirtualAudio"
-        $AudioSys    = Join-Path $AudioBinDir "HvVirtualAudio.sys"
+    if ($Toolchain.ClExe -and $Toolchain.LinkExe) {
+        Write-Host "      -> Compiling HvVirtualAudio.sys with MSVC Kernel Compiler (cl.exe /kernel)..." -ForegroundColor Cyan
 
         $ClAudioRsp = Join-Path $AudioObjDir "cl_audio.rsp"
         [string[]]$ClAudioLines = @(
-            "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/kernel", "/GS", "/O2", "/std:c++20",
+            "/nologo", "/c", "/Zp8", "/Gy", "/GF", "/Zl", "/GR-", "/EHs-c-", "/Zc:sizedDealloc-", "/kernel", "/GS", "/O2", "/std:c++20",
             "/D_WIN64", "/D_AMD64_", "/DAMD64", "/D_KERNEL_MODE", "/DPOOL_NX_OPTIN=1",
             "/I`"$AudioSrcDir`"",
             "/I`"$ShdDir`"",
-            "/I`"$(Join-Path $WdkInc 'km')`"",
-            "/I`"$(Join-Path $WdkInc 'shared')`"",
-            "/I`"$(Join-Path $WdkInc 'km\crt')`"",
+            "/I`"$WdkKmInc`"",
+            "/I`"$WdkSharedInc`"",
+            "/I`"$WdkKmCrtInc`"",
+            "/I`"$(Join-Path $SysSdkInc 'shared')`"",
             "/I`"$MsvcInc`"",
             "/Fo`"$AudioObjDir\\`"",
             "`"$(Join-Path $AudioSrcDir 'Adapter.cpp')`"",
@@ -324,7 +314,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
                 "/NOLOGO", "/DRIVER:WDM", "/SUBSYSTEM:NATIVE", "/NODEFAULTLIB", "/INCREMENTAL:NO",
                 "/OPT:REF", "/OPT:ICF", "/RELEASE", "/ENTRY:GsDriverEntry",
                 "/MERGE:_TEXT=.text;_PAGE=PAGE",
-                "/LIBPATH:`"$(Join-Path $WdkLib 'km\x64')`"",
+                "/LIBPATH:`"$WdkKmLib`"",
                 "/LIBPATH:`"$MsvcLib`"",
                 "/OUT:`"$AudioSys`"",
                 "`"$(Join-Path $AudioObjDir 'Adapter.obj')`"",
@@ -348,8 +338,31 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkVersion) {
     $AudioOut = Join-Path $DistGuest "HvVirtualAudio"
     New-Item -ItemType Directory -Path $AudioOut -Force | Out-Null
     Copy-Item -Path (Join-Path $RepoRoot "src\Guest\HvVirtualAudio\HvVirtualAudio.inf") -Destination $AudioOut -Force
-    Copy-Item -Path (Join-Path $AudioBinDir "HvVirtualAudio.sys") -Destination $AudioOut -Force
+    Copy-Item -Path $AudioSys -Destination $AudioOut -Force
     Write-Host "      -> Built and staged: $AudioOut\HvVirtualAudio.sys" -ForegroundColor Green
+
+    # Automatically test-sign the staged .sys drivers so they are ready for Guest installation
+    try {
+        $CertSubject = "CN=VMStream WDK Test Certificate"
+        $cert = Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq $CertSubject } | Select-Object -First 1
+        if ($null -eq $cert) {
+            $cert = New-SelfSignedCertificate `
+                -Type CodeSigningCert `
+                -Subject $CertSubject `
+                -KeyUsage DigitalSignature `
+                -FriendlyName "VMStream WDK Driver Signing Certificate" `
+                -CertStoreLocation "Cert:\CurrentUser\My" `
+                -NotAfter (Get-Date).AddYears(10)
+        }
+        if ($null -ne $cert) {
+            Export-Certificate -Cert $cert -FilePath (Join-Path $DistGuest "VMStreamTestCert.cer") -Force | Out-Null
+            Set-AuthenticodeSignature -FilePath (Join-Path $TouchOut "HvTouchHid.sys") -Certificate $cert -HashAlgorithm SHA256 | Out-Null
+            Set-AuthenticodeSignature -FilePath (Join-Path $AudioOut "HvVirtualAudio.sys") -Certificate $cert -HashAlgorithm SHA256 | Out-Null
+            Write-Host "      -> Test-signed HvTouchHid.sys and HvVirtualAudio.sys (Cert: $DistGuest\VMStreamTestCert.cer)" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "      -> Note: Drivers will be test-signed inside the Guest VM by Install-GuestDrivers.ps1." -ForegroundColor Gray
+    }
 }
 
 Copy-Item -Path (Join-Path $PSScriptRoot "Install-GuestDrivers.ps1") -Destination $DistGuest -Force

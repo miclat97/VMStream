@@ -287,8 +287,27 @@ public sealed class RdpConsoleControl : AxHost
         if (_ocx is IMsRdpExtendedSettings extSettings)
         {
             TrySetExtendedProperty(extSettings, "DisableCredentialsDelegation", true);
+            TrySetExtendedProperty(extSettings, "DisableEnhancedMode", true);
+            TrySetExtendedProperty(extSettings, "DisableTouchRemoting", true);
+            TrySetExtendedProperty(extSettings, "EnableFrameBufferRedirection", true);
+            TrySetExtendedProperty(extSettings, "EnableHardwareMode", true);
             TrySetExtendedProperty(extSettings, "DesktopScaleFactor", 100u);
             TrySetExtendedProperty(extSettings, "DeviceScaleFactor", 100u);
+        }
+
+        // CRITICAL FOR KEYBOARD SHORTCUTS (Win, Win+R, Alt+Tab, Win+E, etc.):
+        // SecuredSettings.KeyboardHookMode = 1 instructs mstscax.dll to always forward
+        // Windows key shortcuts to the Guest VM whenever the console window has focus
+        // (both in Windowed mode and Borderless Fullscreen mode).
+        object? securedSettings =
+            GetComProperty(_ocx, "SecuredSettings3") ??
+            GetComProperty(_ocx, "SecuredSettings2") ??
+            GetComProperty(_ocx, "SecuredSettings");
+
+        if (securedSettings != null)
+        {
+            SetComProperty(securedSettings, "KeyboardHookMode", 1);
+            SetComProperty(securedSettings, "AudioRedirectionMode", 2); // 2 = Do not play via RDP
         }
 
         if (primaryAdv != null)
@@ -300,12 +319,16 @@ public sealed class RdpConsoleControl : AxHost
             SetComProperty(primaryAdv, "ConnectionBarShowPinButton", false);
             SetComProperty(primaryAdv, "ContainerHandledFullScreen", 1);
 
-            // Enable dynamic viewport scaling, disable VMBus network probing, & lowest input interval
+            // Optimize local VMBus Console Session framerate & input latency:
+            // Compress = 0 disables CPU bulk compression bottleneck over localhost:2179.
+            SetComProperty(primaryAdv, "Compress", 0);
+            SetComProperty(primaryAdv, "BitmapPeristence", 1);
             SetComProperty(primaryAdv, "SmartSizing", true);
             SetComProperty(primaryAdv, "EnableAutoReconnect", true);
             SetComProperty(primaryAdv, "BandwidthDetection", false);
+            SetComProperty(primaryAdv, "NetworkConnectionType", 6u); // 6 = CONNECTION_TYPE_LAN (10 Gbps+)
             SetComProperty(primaryAdv, "minInputSendInterval", 1);
-            SetComProperty(primaryAdv, "PerformanceFlags", 0x80); // TS_PERF_ENABLE_FONT_SMOOTHING
+            SetComProperty(primaryAdv, "PerformanceFlags", 0x00000180); // Font Smoothing + Desktop Composition
             SetComProperty(primaryAdv, "GrabFocusOnConnect", true);
 
             // Disable RDP audio/drive redirection since VMStream uses AF_HYPERV WaveRT audio
@@ -314,6 +337,8 @@ public sealed class RdpConsoleControl : AxHost
             SetComProperty(primaryAdv, "RedirectDrives", false);
             SetComProperty(primaryAdv, "RedirectPrinters", false);
             SetComProperty(primaryAdv, "RedirectSmartCards", false);
+            SetComProperty(primaryAdv, "RedirectPorts", false);
+            SetComProperty(primaryAdv, "RedirectPOSDevices", false);
 
             // Set Pre-Connection Blob (PCB) to the clean uppercase VM GUID right before Connect()
             SetComProperty(primaryAdv, "PCB", cleanPcbGuid);
@@ -321,6 +346,16 @@ public sealed class RdpConsoleControl : AxHost
 
         // Initiate connection to localhost:2179
         InvokeComMethod(_ocx, "Connect");
+    }
+
+    public void SyncFullScreenState(bool fullScreen)
+    {
+        if (_ocx == null) return;
+        try
+        {
+            SetComProperty(_ocx, "FullScreen", fullScreen);
+        }
+        catch { }
     }
 
     private static void EnsureLocalCredSspPolicyDefaults()

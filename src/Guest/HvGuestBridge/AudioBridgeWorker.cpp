@@ -3,12 +3,191 @@
 // Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
 #include "AudioBridgeWorker.h"
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 #include <vector>
 #include <cstdio>
+#include <cstring>
+
+#pragma comment(lib, "ole32.lib")
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
+
+#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
+#endif
+
+#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
+#endif
+
+namespace {
+
+class WasapiLoopbackFallback {
+public:
+    WasapiLoopbackFallback() = default;
+    ~WasapiLoopbackFallback() { Close(); }
+
+    bool EnsureInitialized()
+    {
+        if (m_CaptureClient != nullptr) {
+            return true;
+        }
+
+        const ULONGLONG now = GetTickCount64();
+        if (now - m_LastRetryTickMs < 2500) {
+            return false;
+        }
+        m_LastRetryTickMs = now;
+
+        HRESULT hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator),
+            nullptr,
+            CLSCTX_ALL,
+            __uuidof(IMMDeviceEnumerator),
+            reinterpret_cast<void**>(&m_Enumerator)
+        );
+        if (FAILED(hr) || m_Enumerator == nullptr) {
+            Close();
+            return false;
+        }
+
+        hr = m_Enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_Device);
+        if (FAILED(hr) || m_Device == nullptr) {
+            Close();
+            return false;
+        }
+
+        hr = m_Device->Activate(
+            __uuidof(IAudioClient),
+            CLSCTX_ALL,
+            nullptr,
+            reinterpret_cast<void**>(&m_AudioClient)
+        );
+        if (FAILED(hr) || m_AudioClient == nullptr) {
+            Close();
+            return false;
+        }
+
+        WAVEFORMATEX wfx{};
+        wfx.wFormatTag = WAVE_FORMAT_PCM;
+        wfx.nChannels = HV_AUDIO_CHANNELS_STEREO;
+        wfx.nSamplesPerSec = HV_AUDIO_SAMPLE_RATE;
+        wfx.wBitsPerSample = HV_AUDIO_BITS_PER_SAMPLE_16;
+        wfx.nBlockAlign = HV_AUDIO_BLOCK_ALIGN_STEREO_16;
+        wfx.nAvgBytesPerSec = HV_AUDIO_SAMPLE_RATE * HV_AUDIO_BLOCK_ALIGN_STEREO_16;
+        wfx.cbSize = 0;
+
+        DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK |
+                            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
+                            AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+
+        hr = m_AudioClient->Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            streamFlags,
+            200000, // 20 ms buffer in 100-ns units
+            0,
+            &wfx,
+            nullptr
+        );
+        if (FAILED(hr)) {
+            Close();
+            return false;
+        }
+
+        hr = m_AudioClient->GetService(
+            __uuidof(IAudioCaptureClient),
+            reinterpret_cast<void**>(&m_CaptureClient)
+        );
+        if (FAILED(hr) || m_CaptureClient == nullptr) {
+            Close();
+            return false;
+        }
+
+        hr = m_AudioClient->Start();
+        if (FAILED(hr)) {
+            Close();
+            return false;
+        }
+
+        std::printf("[HvGuestBridge][Audio] WASAPI Loopback fallback initialized on default Guest render endpoint (48kHz 16-bit Stereo).\n");
+        return true;
+    }
+
+    DWORD ReadAvailablePcm(uint8_t* outBuf, DWORD maxBytes)
+    {
+        if (!EnsureInitialized() || m_CaptureClient == nullptr) {
+            return 0;
+        }
+
+        DWORD totalCopied = 0;
+        UINT32 packetLength = 0;
+
+        while (SUCCEEDED(m_CaptureClient->GetNextPacketSize(&packetLength)) && packetLength > 0) {
+            BYTE* data = nullptr;
+            UINT32 numFrames = 0;
+            DWORD flags = 0;
+
+            HRESULT hr = m_CaptureClient->GetBuffer(&data, &numFrames, &flags, nullptr, nullptr);
+            if (FAILED(hr)) {
+                Close();
+                break;
+            }
+
+            DWORD bytesInPacket = numFrames * HV_AUDIO_BLOCK_ALIGN_STEREO_16;
+            if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) == 0 && data != nullptr && bytesInPacket > 0) {
+                DWORD toCopy = (totalCopied + bytesInPacket <= maxBytes)
+                    ? bytesInPacket
+                    : (maxBytes - totalCopied);
+                if (toCopy > 0) {
+                    std::memcpy(outBuf + totalCopied, data, toCopy);
+                    totalCopied += toCopy;
+                }
+            }
+
+            m_CaptureClient->ReleaseBuffer(numFrames);
+            if (totalCopied >= maxBytes) {
+                break;
+            }
+        }
+
+        return totalCopied;
+    }
+
+    void Close()
+    {
+        if (m_AudioClient != nullptr) {
+            m_AudioClient->Stop();
+        }
+        if (m_CaptureClient != nullptr) {
+            m_CaptureClient->Release();
+            m_CaptureClient = nullptr;
+        }
+        if (m_AudioClient != nullptr) {
+            m_AudioClient->Release();
+            m_AudioClient = nullptr;
+        }
+        if (m_Device != nullptr) {
+            m_Device->Release();
+            m_Device = nullptr;
+        }
+        if (m_Enumerator != nullptr) {
+            m_Enumerator->Release();
+            m_Enumerator = nullptr;
+        }
+    }
+
+private:
+    IMMDeviceEnumerator* m_Enumerator     = nullptr;
+    IMMDevice*           m_Device         = nullptr;
+    IAudioClient*        m_AudioClient    = nullptr;
+    IAudioCaptureClient* m_CaptureClient  = nullptr;
+    ULONGLONG            m_LastRetryTickMs = 0;
+};
+
+} // namespace
 
 AudioBridgeWorker::AudioBridgeWorker(const std::string& tcpFallbackHost)
     : m_TcpFallbackHost(tcpFallbackHost),
@@ -151,9 +330,13 @@ void AudioBridgeWorker::MainConnectionLoop()
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     std::vector<uint8_t> payloadBuf(8192);
+    bool loggedMissingAudioDriver = false;
 
     while (m_Running.load(std::memory_order_acquire)) {
-        EnsureDriverHandleOpen();
+        if (!EnsureDriverHandleOpen() && !loggedMissingAudioDriver) {
+            loggedMissingAudioDriver = true;
+            std::printf("[HvGuestBridge][Audio] Note: \\\\.\\HvVirtualAudio is not loaded yet. Run Install-GuestDrivers.ps1 as Admin in the Guest VM to install 'Hyper-V Console Speakers' & 'Hyper-V Console Microphone'.\n");
+        }
 
         if (!m_Transport->Connect(1500)) {
             Sleep(500);
@@ -260,10 +443,13 @@ void AudioBridgeWorker::MainConnectionLoop()
 
 // ============================================================================
 // RenderSenderLoop - Pumps 10ms Speaker PCM Frames (48kHz 16-bit Stereo) to Host
+// Reads from HvVirtualAudio.sys WaveRT ring buffer, with automatic fallback to
+// WASAPI Loopback capture if another audio endpoint is active in the Guest VM.
 // ============================================================================
 void AudioBridgeWorker::RenderSenderLoop(HANDLE stopSessionEvent)
 {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     HANDLE hTimer = CreateWaitableTimerExW(
         nullptr,
@@ -281,6 +467,7 @@ void AudioBridgeWorker::RenderSenderLoop(HANDLE stopSessionEvent)
         SetWaitableTimer(hTimer, &dueTime, HV_AUDIO_PERIOD_MS, nullptr, nullptr, FALSE);
     }
 
+    WasapiLoopbackFallback loopbackFallback;
     uint8_t pcmBuffer[HV_AUDIO_PERIOD_BYTES_STEREO_16 * 2]{};
     HANDLE waitHandles[2] = { stopSessionEvent, hTimer };
     DWORD waitCount = (hTimer != nullptr) ? 2 : 1;
@@ -291,46 +478,79 @@ void AudioBridgeWorker::RenderSenderLoop(HANDLE stopSessionEvent)
             break; // stopSessionEvent signaled
         }
 
-        // Drain up to 2 periods per wake-up to prevent kernel ring buffer accumulation
-        for (int pass = 0; pass < 2; ++pass) {
-            DWORD bytesRead = 0;
-            bool ok = IoctlSync(
-                IOCTL_HVAUDIO_READ_RENDER_PCM,
-                nullptr,
-                0,
-                pcmBuffer,
-                HV_AUDIO_PERIOD_BYTES_STEREO_16,
-                &bytesRead,
-                20,
-                stopSessionEvent
-            );
+        bool sentFromKernelWaveRt = false;
 
-            if (!ok || bytesRead == 0) {
-                break;
+        // 1. Primary path: Drain up to 2 periods from HvVirtualAudio.sys kernel WaveRT ring buffer
+        if (EnsureDriverHandleOpen()) {
+            for (int pass = 0; pass < 2; ++pass) {
+                DWORD bytesRead = 0;
+                bool ok = IoctlSync(
+                    IOCTL_HVAUDIO_READ_RENDER_PCM,
+                    nullptr,
+                    0,
+                    pcmBuffer,
+                    HV_AUDIO_PERIOD_BYTES_STEREO_16,
+                    &bytesRead,
+                    20,
+                    stopSessionEvent
+                );
+
+                if (!ok || bytesRead == 0) {
+                    break;
+                }
+
+                sentFromKernelWaveRt = true;
+
+                HV_AUDIO_FRAME_HEADER frameHdr{};
+                frameHdr.SampleRate = HV_AUDIO_SAMPLE_RATE;
+                frameHdr.Channels = HV_AUDIO_CHANNELS_STEREO;
+                frameHdr.BitsPerSample = HV_AUDIO_BITS_PER_SAMPLE_16;
+                frameHdr.FrameSamples = static_cast<uint16_t>(bytesRead / HV_AUDIO_BLOCK_ALIGN_STEREO_16);
+                frameHdr.Flags = HvAudioFlag_None;
+
+                if (!m_Transport->SendPacket(
+                        HvPacketType_AudioRenderPcm,
+                        &frameHdr,
+                        sizeof(frameHdr),
+                        pcmBuffer,
+                        static_cast<uint16_t>(bytesRead)))
+                {
+                    break;
+                }
             }
+        }
 
-            HV_AUDIO_FRAME_HEADER frameHdr{};
-            frameHdr.SampleRate = HV_AUDIO_SAMPLE_RATE;
-            frameHdr.Channels = HV_AUDIO_CHANNELS_STEREO;
-            frameHdr.BitsPerSample = HV_AUDIO_BITS_PER_SAMPLE_16;
-            frameHdr.FrameSamples = static_cast<uint16_t>(bytesRead / HV_AUDIO_BLOCK_ALIGN_STEREO_16);
-            frameHdr.Flags = HvAudioFlag_None;
+        // 2. Fallback path: If HvVirtualAudio.sys is not open yet, try WASAPI Loopback on any active Guest audio device
+        if (!sentFromKernelWaveRt && !EnsureDriverHandleOpen()) {
+            DWORD loopbackBytes = loopbackFallback.ReadAvailablePcm(pcmBuffer, HV_AUDIO_PERIOD_BYTES_STEREO_16);
+            if (loopbackBytes > 0) {
+                HV_AUDIO_FRAME_HEADER frameHdr{};
+                frameHdr.SampleRate = HV_AUDIO_SAMPLE_RATE;
+                frameHdr.Channels = HV_AUDIO_CHANNELS_STEREO;
+                frameHdr.BitsPerSample = HV_AUDIO_BITS_PER_SAMPLE_16;
+                frameHdr.FrameSamples = static_cast<uint16_t>(loopbackBytes / HV_AUDIO_BLOCK_ALIGN_STEREO_16);
+                frameHdr.Flags = HvAudioFlag_None;
 
-            if (!m_Transport->SendPacket(
+                m_Transport->SendPacket(
                     HvPacketType_AudioRenderPcm,
                     &frameHdr,
                     sizeof(frameHdr),
                     pcmBuffer,
-                    static_cast<uint16_t>(bytesRead)))
-            {
-                break;
+                    static_cast<uint16_t>(loopbackBytes)
+                );
             }
         }
     }
 
+    loopbackFallback.Close();
+
     if (hTimer != nullptr) {
         CancelWaitableTimer(hTimer);
         CloseHandle(hTimer);
+    }
+
+    if (SUCCEEDED(hrCom)) {
+        CoUninitialize();
     }
 }
 

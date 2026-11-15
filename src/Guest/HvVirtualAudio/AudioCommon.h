@@ -4,17 +4,11 @@
 // ============================================================================
 #pragma once
 
-#include <ntddk.h>
-#include <windef.h>
-#define NOBITMAP
-#include <mmreg.h>
-#undef NOBITMAP
-#include <ks.h>
-#include <ksmedia.h>
-#include <unknown.h>
 #include <portcls.h>
 #include <stdunk.h>
-#include <drmk.h>
+#include <ksdebug.h>
+#include <ntintsafe.h>
+#include <ntstrsafe.h>
 
 #include "../../Shared/HvProtocol.h"
 

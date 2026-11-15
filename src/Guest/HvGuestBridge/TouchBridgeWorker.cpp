@@ -1,10 +1,15 @@
 // ============================================================================
-// TouchBridgeWorker.cpp - Guest Multi-Touch AF_HYPERV to VHF Driver Bridge
+// TouchBridgeWorker.cpp - Guest Multi-Touch AF_HYPERV to VHF / TouchInjection Bridge
 // Project: VMStream - Guest Service Bridge (HvGuestBridge.exe)
 // ============================================================================
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+
 #include "TouchBridgeWorker.h"
 #include <vector>
 #include <cstdio>
+#include <cstring>
 
 TouchBridgeWorker::TouchBridgeWorker(const std::string& tcpFallbackHost)
     : m_TcpFallbackHost(tcpFallbackHost),
@@ -14,10 +19,14 @@ TouchBridgeWorker::TouchBridgeWorker(const std::string& tcpFallbackHost)
           tcpFallbackHost
       )),
       m_DriverHandle(INVALID_HANDLE_VALUE),
+      m_TouchInjectionInitialized(false),
+      m_LoggedDriverFallbackNotice(false),
       m_Running(false),
       m_LastScanTime(0),
       m_HadActiveContacts(false)
 {
+    std::memset(m_ActiveContactIds, 0, sizeof(m_ActiveContactIds));
+    std::memset(m_LastContactPixels, 0, sizeof(m_LastContactPixels));
 }
 
 TouchBridgeWorker::~TouchBridgeWorker()
@@ -81,6 +90,113 @@ void TouchBridgeWorker::CloseDriverHandle()
     }
 }
 
+bool TouchBridgeWorker::EnsureUserModeTouchInjectionInitialized()
+{
+    if (m_TouchInjectionInitialized) {
+        return true;
+    }
+
+    if (InitializeTouchInjection(HV_MAX_TOUCH_CONTACTS, TOUCH_FEEDBACK_DEFAULT)) {
+        m_TouchInjectionInitialized = true;
+        if (!m_LoggedDriverFallbackNotice) {
+            m_LoggedDriverFallbackNotice = true;
+            std::printf("[HvGuestBridge][Touch] Using Win32 Multi-Touch Digitizer Injection (InitializeTouchInjection) while HvTouchHid.sys is not loaded.\n");
+        }
+        return true;
+    }
+
+    return false;
+}
+
+void TouchBridgeWorker::InjectFrameUserMode(const HV_TOUCH_INPUT_REPORT& report)
+{
+    if (!EnsureUserModeTouchInjectionInitialized()) {
+        return;
+    }
+
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (screenW <= 0) screenW = GetSystemMetrics(SM_CXSCREEN);
+    if (screenH <= 0) screenH = GetSystemMetrics(SM_CYSCREEN);
+    if (screenW <= 0) screenW = 1920;
+    if (screenH <= 0) screenH = 1080;
+
+    POINTER_TOUCH_INFO contacts[HV_MAX_TOUCH_CONTACTS]{};
+    UINT32 injectCount = 0;
+    bool seenInFrame[128]{};
+
+    const uint8_t count = (report.ContactCount <= HV_MAX_TOUCH_CONTACTS)
+        ? report.ContactCount
+        : HV_MAX_TOUCH_CONTACTS;
+
+    for (uint8_t i = 0; i < count; ++i) {
+        const HV_TOUCH_CONTACT& c = report.Contacts[i];
+        const uint8_t id = static_cast<uint8_t>(c.ContactId & 0x7F);
+        seenInFrame[id] = true;
+
+        LONG px = screenX + static_cast<LONG>((static_cast<int64_t>(c.X) * (screenW - 1)) / HV_TOUCH_COORDINATE_MAX);
+        LONG py = screenY + static_cast<LONG>((static_cast<int64_t>(c.Y) * (screenH - 1)) / HV_TOUCH_COORDINATE_MAX);
+
+        bool wasDown = m_ActiveContactIds[id];
+        bool isDown  = (c.TipSwitch != 0);
+
+        if (!isDown && !wasDown) {
+            continue;
+        }
+
+        POINTER_TOUCH_INFO& ti = contacts[injectCount++];
+        ti.pointerInfo.pointerType = PT_TOUCH;
+        ti.pointerInfo.pointerId = id;
+        ti.pointerInfo.ptPixelLocation.x = px;
+        ti.pointerInfo.ptPixelLocation.y = py;
+
+        if (isDown && !wasDown) {
+            ti.pointerInfo.pointerFlags = POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+            m_ActiveContactIds[id] = true;
+            m_LastContactPixels[id] = { px, py };
+        } else if (isDown && wasDown) {
+            ti.pointerInfo.pointerFlags = POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+            m_LastContactPixels[id] = { px, py };
+        } else {
+            ti.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+            m_ActiveContactIds[id] = false;
+        }
+
+        ti.touchFlags = TOUCH_FLAG_NONE;
+        ti.touchMask  = TOUCH_MASK_CONTACTAREA | TOUCH_MASK_ORIENTATION | TOUCH_MASK_PRESSURE;
+        ti.rcContact.left   = px - 2;
+        ti.rcContact.top    = py - 2;
+        ti.rcContact.right  = px + 2;
+        ti.rcContact.bottom = py + 2;
+        ti.orientation = 90;
+        ti.pressure    = 32000;
+    }
+
+    // Release any previously active contact IDs that were omitted from this frame
+    for (uint8_t id = 0; id < 128 && injectCount < HV_MAX_TOUCH_CONTACTS; ++id) {
+        if (m_ActiveContactIds[id] && !seenInFrame[id]) {
+            POINTER_TOUCH_INFO& ti = contacts[injectCount++];
+            ti.pointerInfo.pointerType = PT_TOUCH;
+            ti.pointerInfo.pointerId = id;
+            ti.pointerInfo.ptPixelLocation = m_LastContactPixels[id];
+            ti.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+            m_ActiveContactIds[id] = false;
+        }
+    }
+
+    if (injectCount > 0) {
+        if (!InjectTouchInput(injectCount, contacts)) {
+            // Re-initialize on desktop switch if needed
+            m_TouchInjectionInitialized = false;
+            if (EnsureUserModeTouchInjectionInitialized()) {
+                InjectTouchInput(injectCount, contacts);
+            }
+        }
+    }
+}
+
 // ============================================================================
 // ReleaseAllTouchContacts - Anti-Stuck-Touch Protection
 // Immediately submits a zeroed 64-byte HV_TOUCH_INPUT_REPORT (ContactCount=0,
@@ -89,38 +205,54 @@ void TouchBridgeWorker::CloseDriverHandle()
 // ============================================================================
 void TouchBridgeWorker::ReleaseAllTouchContacts()
 {
-    if (!EnsureDriverHandleOpen()) {
-        return;
+    if (EnsureDriverHandleOpen()) {
+        HV_TOUCH_INPUT_REPORT zeroReport{};
+        zeroReport.ReportId = HV_TOUCH_REPORT_ID_INPUT;
+        zeroReport.ContactCount = 0;
+        m_LastScanTime = static_cast<uint16_t>(m_LastScanTime + 100);
+        zeroReport.ScanTime = m_LastScanTime;
+
+        DWORD bytesReturned = 0;
+        DeviceIoControl(
+            m_DriverHandle,
+            IOCTL_HVTOUCH_SUBMIT_FRAME,
+            &zeroReport,
+            sizeof(zeroReport),
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr
+        );
+
+        DeviceIoControl(
+            m_DriverHandle,
+            IOCTL_HVTOUCH_RESET_CONTACTS,
+            nullptr,
+            0,
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr
+        );
     }
 
-    HV_TOUCH_INPUT_REPORT zeroReport{};
-    zeroReport.ReportId = HV_TOUCH_REPORT_ID_INPUT;
-    zeroReport.ContactCount = 0;
-    m_LastScanTime = static_cast<uint16_t>(m_LastScanTime + 100);
-    zeroReport.ScanTime = m_LastScanTime;
-
-    DWORD bytesReturned = 0;
-    DeviceIoControl(
-        m_DriverHandle,
-        IOCTL_HVTOUCH_SUBMIT_FRAME,
-        &zeroReport,
-        sizeof(zeroReport),
-        nullptr,
-        0,
-        &bytesReturned,
-        nullptr
-    );
-
-    DeviceIoControl(
-        m_DriverHandle,
-        IOCTL_HVTOUCH_RESET_CONTACTS,
-        nullptr,
-        0,
-        nullptr,
-        0,
-        &bytesReturned,
-        nullptr
-    );
+    if (m_TouchInjectionInitialized) {
+        POINTER_TOUCH_INFO upContacts[HV_MAX_TOUCH_CONTACTS]{};
+        UINT32 count = 0;
+        for (uint8_t id = 0; id < 128 && count < HV_MAX_TOUCH_CONTACTS; ++id) {
+            if (m_ActiveContactIds[id]) {
+                POINTER_TOUCH_INFO& ti = upContacts[count++];
+                ti.pointerInfo.pointerType = PT_TOUCH;
+                ti.pointerInfo.pointerId = id;
+                ti.pointerInfo.ptPixelLocation = m_LastContactPixels[id];
+                ti.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+                m_ActiveContactIds[id] = false;
+            }
+        }
+        if (count > 0) {
+            InjectTouchInput(count, upContacts);
+        }
+    }
 
     m_HadActiveContacts = false;
 }
@@ -190,6 +322,9 @@ void TouchBridgeWorker::WorkerLoop()
                     if (!ok && GetLastError() == ERROR_INVALID_HANDLE) {
                         CloseDriverHandle();
                     }
+                } else {
+                    // Fallback to Win32 InitializeTouchInjection + InjectTouchInput when HvTouchHid.sys is not yet installed
+                    InjectFrameUserMode(report);
                 }
             }
             else if (packetType == HvPacketType_TouchReset) {

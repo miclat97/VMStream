@@ -218,28 +218,32 @@ Add-Type -TypeDefinition $SetupApiCode -Language CSharp
 
 Write-Host "`n[4/5] Installing Root\HvTouchHid and Root\HvVirtualAudio WDK drivers..." -ForegroundColor Yellow
 
+$BridgeExe = Get-ChildItem -Path $PackageDir -Recurse -Filter "HvGuestBridge.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+
 $TouchInf = Get-ChildItem -Path $PackageDir -Recurse -Filter "HvTouchHid.inf" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $TouchInf) {
     & pnputil.exe /add-driver "$($TouchInf.FullName)" /install | Out-Host
-    $existingTouch = Get-PnpDevice -InstanceId "ROOT\HIDCLASS\*" -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like "*Hyper-V Console Multi-Touch*" }
-    if ($null -eq $existingTouch) {
+    if ($null -ne $BridgeExe) {
+        & $BridgeExe.FullName --install-driver "Root\HvTouchHid" "$($TouchInf.FullName)" | Out-Host
+    } else {
         [RootDevNodeInstaller]::InstallRootEnumeratedDriver($TouchInf.FullName, "Root\HvTouchHid") | Out-Null
     }
     Write-Host "      -> Installed Multi-Touch Digitizer Driver (Root\HvTouchHid)" -ForegroundColor Green
 } else {
-    Write-Warning "HvTouchHid.inf not found under $PackageDir. Build WDK drivers first with Build-All.ps1."
+    Write-Warning "HvTouchHid.inf not found under $PackageDir. Build WDK drivers first with Setup-And-Build.cmd."
 }
 
 $AudioInf = Get-ChildItem -Path $PackageDir -Recurse -Filter "HvVirtualAudio.inf" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $AudioInf) {
     & pnputil.exe /add-driver "$($AudioInf.FullName)" /install | Out-Host
-    $existingAudio = Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like "*Hyper-V Console*" }
-    if ($null -eq $existingAudio) {
+    if ($null -ne $BridgeExe) {
+        & $BridgeExe.FullName --install-driver "Root\HvVirtualAudio" "$($AudioInf.FullName)" | Out-Host
+    } else {
         [RootDevNodeInstaller]::InstallRootEnumeratedDriver($AudioInf.FullName, "Root\HvVirtualAudio") | Out-Null
     }
     Write-Host "      -> Installed Virtual Audio Driver (Root\HvVirtualAudio)" -ForegroundColor Green
 } else {
-    Write-Warning "HvVirtualAudio.inf not found under $PackageDir. Build WDK drivers first with Build-All.ps1."
+    Write-Warning "HvVirtualAudio.inf not found under $PackageDir. Build WDK drivers first with Setup-And-Build.cmd."
 }
 
 # ----------------------------------------------------------------------------
@@ -247,7 +251,6 @@ if ($null -ne $AudioInf) {
 # ----------------------------------------------------------------------------
 Write-Host "`n[5/5] Installing HvGuestBridge.exe Windows Service (LocalSystem)..." -ForegroundColor Yellow
 
-$BridgeExe = Get-ChildItem -Path $PackageDir -Recurse -Filter "HvGuestBridge.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -ne $BridgeExe) {
     $InstallDir = "C:\Program Files\VMStream\Guest"
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -255,6 +258,17 @@ if ($null -ne $BridgeExe) {
     Stop-Service -Name "HvGuestBridge" -Force -ErrorAction SilentlyContinue
     $TargetExe = Join-Path $InstallDir "HvGuestBridge.exe"
     Copy-Item -Path $BridgeExe.FullName -Destination $TargetExe -Force
+
+    if ($null -ne $TouchInf) {
+        $TargetTouchDir = Join-Path $InstallDir "HvTouchHid"
+        New-Item -ItemType Directory -Path $TargetTouchDir -Force | Out-Null
+        Copy-Item -Path "$($TouchInf.DirectoryName)\*" -Destination $TargetTouchDir -Force
+    }
+    if ($null -ne $AudioInf) {
+        $TargetAudioDir = Join-Path $InstallDir "HvVirtualAudio"
+        New-Item -ItemType Directory -Path $TargetAudioDir -Force | Out-Null
+        Copy-Item -Path "$($AudioInf.DirectoryName)\*" -Destination $TargetAudioDir -Force
+    }
 
     & $TargetExe --install | Out-Host
     Write-Host "      -> HvGuestBridge service installed and running from: $TargetExe" -ForegroundColor Green

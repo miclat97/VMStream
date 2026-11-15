@@ -1,18 +1,28 @@
 // ============================================================================
 // ServiceMain.cpp - Guest Windows Service Entry Point (HvGuestBridge.exe)
 // Connects AF_HYPERV (HV_GUID_PARENT) sockets to HvTouchHid & HvVirtualAudio
+// Includes native SetupAPI + newdev.dll Root PnP DevNode auto-installer.
 // ============================================================================
 #include "TouchBridgeWorker.h"
 #include "AudioBridgeWorker.h"
 
 #include <windows.h>
 #include <winsvc.h>
+#include <setupapi.h>
+#include <newdev.h>
+#include <mmsystem.h>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "setupapi.lib")
+#pragma comment(lib, "newdev.lib")
+#pragma comment(lib, "winmm.lib")
 
 static constexpr const wchar_t* kServiceName        = L"HvGuestBridge";
 static constexpr const wchar_t* kServiceDisplayName = L"Hyper-V Console Audio & Multi-Touch Guest Bridge";
@@ -23,6 +33,199 @@ static SERVICE_STATUS_HANDLE g_ServiceStatusHandle = nullptr;
 static SERVICE_STATUS        g_ServiceStatus{};
 static HANDLE                g_StopEvent           = nullptr;
 static std::string           g_TcpFallbackHost;
+
+// ============================================================================
+// Native Root-Enumerated PnP Driver Installer (SetupAPI + newdev.dll)
+// Creates Root\HvTouchHid and Root\HvVirtualAudio DevNodes without devcon.exe
+// ============================================================================
+static bool DoesRootDeviceNodeExist(const wchar_t* targetHardwareId)
+{
+    HDEVINFO devInfo = SetupDiGetClassDevsW(nullptr, L"ROOT", nullptr, DIGCF_ALLCLASSES);
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    bool found = false;
+    SP_DEVINFO_DATA devData{};
+    devData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+    for (DWORD index = 0; SetupDiEnumDeviceInfo(devInfo, index, &devData); ++index) {
+        wchar_t hwidBuf[512]{};
+        DWORD regType = 0;
+        if (SetupDiGetDeviceRegistryPropertyW(
+                devInfo,
+                &devData,
+                SPDRP_HARDWAREID,
+                &regType,
+                reinterpret_cast<PBYTE>(hwidBuf),
+                sizeof(hwidBuf) - sizeof(wchar_t),
+                nullptr))
+        {
+            for (const wchar_t* p = hwidBuf; *p != L'\0'; p += std::wcslen(p) + 1) {
+                if (_wcsicmp(p, targetHardwareId) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (found) {
+            break;
+        }
+    }
+
+    SetupDiDestroyDeviceInfoList(devInfo);
+    return found;
+}
+
+static bool InstallRootEnumeratedDriver(const wchar_t* hardwareId, const wchar_t* infPath)
+{
+    wchar_t fullInfPath[MAX_PATH]{};
+    if (GetFullPathNameW(infPath, MAX_PATH, fullInfPath, nullptr) == 0) {
+        return false;
+    }
+
+    if (GetFileAttributesW(fullInfPath) == INVALID_FILE_ATTRIBUTES) {
+        std::fprintf(stderr, "[HvGuestBridge] INF file not found: %ls\n", fullInfPath);
+        return false;
+    }
+
+    GUID classGuid{};
+    wchar_t className[MAX_CLASS_NAME_LEN]{};
+    DWORD requiredSize = 0;
+    if (!SetupDiGetINFClassW(fullInfPath, &classGuid, className, MAX_CLASS_NAME_LEN, &requiredSize)) {
+        std::fprintf(stderr, "[HvGuestBridge] SetupDiGetINFClassW failed for %ls (error=%lu)\n", fullInfPath, GetLastError());
+        return false;
+    }
+
+    // Create the Root\<Device> PnP DevNode if it does not already exist
+    if (!DoesRootDeviceNodeExist(hardwareId)) {
+        HDEVINFO devInfoSet = SetupDiCreateDeviceInfoList(&classGuid, nullptr);
+        if (devInfoSet == INVALID_HANDLE_VALUE) {
+            std::fprintf(stderr, "[HvGuestBridge] SetupDiCreateDeviceInfoList failed (error=%lu)\n", GetLastError());
+            return false;
+        }
+
+        SP_DEVINFO_DATA devInfoData{};
+        devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+        if (!SetupDiCreateDeviceInfoW(
+                devInfoSet,
+                className,
+                &classGuid,
+                nullptr,
+                nullptr,
+                DICD_GENERATE_ID,
+                &devInfoData))
+        {
+            std::fprintf(stderr, "[HvGuestBridge] SetupDiCreateDeviceInfoW failed (error=%lu)\n", GetLastError());
+            SetupDiDestroyDeviceInfoList(devInfoSet);
+            return false;
+        }
+
+        // Build REG_MULTI_SZ double-null-terminated hardware ID buffer
+        std::vector<wchar_t> multiSz(std::wcslen(hardwareId) + 2, L'\0');
+        std::memcpy(multiSz.data(), hardwareId, std::wcslen(hardwareId) * sizeof(wchar_t));
+
+        if (!SetupDiSetDeviceRegistryPropertyW(
+                devInfoSet,
+                &devInfoData,
+                SPDRP_HARDWAREID,
+                reinterpret_cast<const BYTE*>(multiSz.data()),
+                static_cast<DWORD>(multiSz.size() * sizeof(wchar_t))))
+        {
+            std::fprintf(stderr, "[HvGuestBridge] SetupDiSetDeviceRegistryPropertyW failed (error=%lu)\n", GetLastError());
+            SetupDiDestroyDeviceInfoList(devInfoSet);
+            return false;
+        }
+
+        if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, devInfoSet, &devInfoData)) {
+            std::fprintf(stderr, "[HvGuestBridge] SetupDiCallClassInstaller(DIF_REGISTERDEVICE) failed (error=%lu)\n", GetLastError());
+            SetupDiDestroyDeviceInfoList(devInfoSet);
+            return false;
+        }
+
+        SetupDiDestroyDeviceInfoList(devInfoSet);
+        std::printf("[HvGuestBridge] Created Root PnP device node: %ls\n", hardwareId);
+    }
+
+    BOOL rebootRequired = FALSE;
+    if (!UpdateDriverForPlugAndPlayDevicesW(
+            nullptr,
+            hardwareId,
+            fullInfPath,
+            INSTALLFLAG_FORCE,
+            &rebootRequired))
+    {
+        DWORD err = GetLastError();
+        std::fprintf(
+            stderr,
+            "[HvGuestBridge] UpdateDriverForPlugAndPlayDevicesW(%ls) returned error=0x%08lX (%lu).\n",
+            hardwareId,
+            err,
+            err
+        );
+        return false;
+    }
+
+    std::printf("[HvGuestBridge] Successfully installed WDK driver '%ls' from %ls\n", hardwareId, fullInfPath);
+    return true;
+}
+
+static bool IsDeviceSymbolicLinkAvailable(const wchar_t* devicePath)
+{
+    HANDLE h = CreateFileW(
+        devicePath,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+        return true;
+    }
+    return false;
+}
+
+static void AutoInstallAdjacentDriversIfNeeded()
+{
+    wchar_t modulePath[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, modulePath, MAX_PATH) == 0) {
+        return;
+    }
+
+    std::wstring exeDir(modulePath);
+    size_t lastSlash = exeDir.find_last_of(L"\\/");
+    if (lastSlash != std::wstring::npos) {
+        exeDir.resize(lastSlash);
+    }
+
+    // 1. Check HvTouchHid.sys
+    if (!IsDeviceSymbolicLinkAvailable(HVTOUCH_WIN32_DEVICE_PATH)) {
+        std::wstring touchInf = exeDir + L"\\HvTouchHid\\HvTouchHid.inf";
+        std::wstring touchSys = exeDir + L"\\HvTouchHid\\HvTouchHid.sys";
+        if (GetFileAttributesW(touchInf.c_str()) != INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW(touchSys.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            std::printf("[HvGuestBridge] Auto-installing adjacent Multi-Touch WDK driver (%ls)...\n", touchInf.c_str());
+            InstallRootEnumeratedDriver(L"Root\\HvTouchHid", touchInf.c_str());
+        }
+    }
+
+    // 2. Check HvVirtualAudio.sys
+    if (!IsDeviceSymbolicLinkAvailable(HVAUDIO_WIN32_DEVICE_PATH)) {
+        std::wstring audioInf = exeDir + L"\\HvVirtualAudio\\HvVirtualAudio.inf";
+        std::wstring audioSys = exeDir + L"\\HvVirtualAudio\\HvVirtualAudio.sys";
+        if (GetFileAttributesW(audioInf.c_str()) != INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW(audioSys.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            std::printf("[HvGuestBridge] Auto-installing adjacent Virtual Audio WDK driver (%ls)...\n", audioInf.c_str());
+            InstallRootEnumeratedDriver(L"Root\\HvVirtualAudio", audioInf.c_str());
+        }
+    }
+}
 
 // ============================================================================
 // Service Status Helper
@@ -89,11 +292,17 @@ static DWORD WINAPI ServiceCtrlHandlerEx(
 // ============================================================================
 static int RunBridgeEngine(HANDLE stopSignalEvent)
 {
+    timeBeginPeriod(1);
+
     WSADATA wsaData{};
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::fprintf(stderr, "[HvGuestBridge] WSAStartup failed: %d\n", WSAGetLastError());
+        timeEndPeriod(1);
         return 1;
     }
+
+    // Automatically install HvTouchHid.sys and HvVirtualAudio.sys if staged next to HvGuestBridge.exe
+    AutoInstallAdjacentDriversIfNeeded();
 
     TouchBridgeWorker touchWorker(g_TcpFallbackHost);
     AudioBridgeWorker audioWorker(g_TcpFallbackHost);
@@ -113,6 +322,7 @@ static int RunBridgeEngine(HANDLE stopSignalEvent)
     audioWorker.Stop();
 
     WSACleanup();
+    timeEndPeriod(1);
     return 0;
 }
 
@@ -187,6 +397,21 @@ static int InstallWindowsService()
 
     if (svc == nullptr && GetLastError() == ERROR_SERVICE_EXISTS) {
         svc = OpenServiceW(scm, kServiceName, SERVICE_ALL_ACCESS);
+        if (svc != nullptr) {
+            ChangeServiceConfigW(
+                svc,
+                SERVICE_WIN32_OWN_PROCESS,
+                SERVICE_AUTO_START,
+                SERVICE_ERROR_NORMAL,
+                quotedPath.c_str(),
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                kServiceDisplayName
+            );
+        }
     }
 
     if (svc == nullptr) {
@@ -256,6 +481,16 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
     return FALSE;
 }
 
+static std::wstring Utf8ToWide(const char* str)
+{
+    if (str == nullptr || *str == '\0') return std::wstring();
+    int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+    if (len <= 1) return std::wstring();
+    std::wstring res(len - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, str, -1, res.data(), len);
+    return res;
+}
+
 int main(int argc, char* argv[])
 {
     bool consoleMode = false;
@@ -272,6 +507,11 @@ int main(int argc, char* argv[])
         }
         else if (std::strcmp(argv[i], "--uninstall") == 0) {
             return UninstallWindowsService();
+        }
+        else if (std::strcmp(argv[i], "--install-driver") == 0 && (i + 2) < argc) {
+            std::wstring hwid = Utf8ToWide(argv[++i]);
+            std::wstring inf  = Utf8ToWide(argv[++i]);
+            return InstallRootEnumeratedDriver(hwid.c_str(), inf.c_str()) ? 0 : 1;
         }
         else if (std::strcmp(argv[i], "--tcp-fallback") == 0 && (i + 1) < argc) {
             g_TcpFallbackHost = argv[++i];

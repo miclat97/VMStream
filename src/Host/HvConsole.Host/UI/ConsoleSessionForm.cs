@@ -6,6 +6,7 @@
 // ============================================================================
 using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using HvConsole.Host.Audio;
 using HvConsole.Host.Input;
@@ -18,6 +19,12 @@ namespace HvConsole.Host.UI;
 
 public sealed class ConsoleSessionForm : Form
 {
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint uPeriod);
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeEndPeriod(uint uPeriod);
+
     private readonly HyperVVmInfo _vmInfo;
     private readonly IHvTransport _audioTransport;
     private readonly IHvTransport _touchTransport;
@@ -110,7 +117,7 @@ public sealed class ConsoleSessionForm : Form
         _lblBannerMessage = new Label
         {
             Dock = DockStyle.Fill,
-            Text = $"Connecting to Hyper-V Console '{_vmInfo.Name}' ({_vmInfo.PcbGuidString}) on port 2179...  |  Hotkeys: Ctrl+Alt+Shift+H (HUD)  \u2022  Ctrl+Alt+Shift+M (Mic)  \u2022  Ctrl+Alt+Pause (Fullscreen)",
+            Text = $"Connecting to Hyper-V Console '{_vmInfo.Name}' ({_vmInfo.PcbGuidString}) on port 2179...  |  Hotkeys: Ctrl+Alt+Shift+H (HUD)  *  Ctrl+Alt+Shift+M (Mic)  *  Ctrl+Alt+Pause (Fullscreen)",
             Font = new Font("Segoe UI", 9.0f),
             ForeColor = Color.FromArgb(148, 163, 184),
             TextAlign = ContentAlignment.MiddleCenter
@@ -132,9 +139,9 @@ public sealed class ConsoleSessionForm : Form
         _rdpControl.FatalError += OnRdpFatalError;
         _rdpControl.RemoteDesktopSizeChanged += OnRdpDesktopSizeChanged;
 
-        // Watchdog timer ensures IHWindowClass remains subclassed even if mstscax.dll
-        // recreates its internal child windows after a guest resolution change.
-        _subclassWatchdogTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        // Watchdog timer ensures IHWindowClass and all child windows remain subclassed
+        // and unregistered from legacy WM_TOUCH even if mstscax.dll recreates them.
+        _subclassWatchdogTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _subclassWatchdogTimer.Tick += (_, _) =>
         {
             if (_rdpControl.IsHandleCreated)
@@ -147,6 +154,8 @@ public sealed class ConsoleSessionForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+
+        try { timeBeginPeriod(1); } catch { }
 
         _keyboardHook.Install();
         _audioTransport.Start();
@@ -163,11 +172,15 @@ public sealed class ConsoleSessionForm : Form
             _rdpControl.CreateControl();
         }
 
+        _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+        _subclassWatchdogTimer.Start();
+
         BeginInvoke(() =>
         {
             try
             {
                 _rdpControl.ConnectToHyperVConsole(_vmInfo.VmId);
+                _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
             }
             catch (Exception ex)
             {
@@ -186,6 +199,10 @@ public sealed class ConsoleSessionForm : Form
         }
         _statusBannerPanel.Visible = true;
         _lblBannerMessage.Text = $"Authenticating with Hyper-V VMMS (localhost:2179, PCB={_vmInfo.PcbGuidString})...";
+        if (_rdpControl.IsHandleCreated)
+        {
+            _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+        }
     }
 
     private void OnRdpConnected()
@@ -202,6 +219,11 @@ public sealed class ConsoleSessionForm : Form
         // Subclass internal IHWindowClass child window of mstscax.dll for WM_POINTER capture
         _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
         _subclassWatchdogTimer.Start();
+
+        if (_isBorderlessFullscreen)
+        {
+            _rdpControl.SyncFullScreenState(true);
+        }
 
         UpdateWindowTitleAndHud();
 
@@ -310,6 +332,7 @@ public sealed class ConsoleSessionForm : Form
             );
         }
 
+        _rdpControl.SyncFullScreenState(enableFullscreen);
         _rdpControl.Focus();
     }
 
@@ -338,7 +361,7 @@ public sealed class ConsoleSessionForm : Form
         {
             _toastForm.ShowToast(
                 this,
-                "\U0001F512 Host Microphone: MUTED & LOCKED",
+                "[LOCKED] Host Microphone: MUTED & LOCKED",
                 "Host WASAPI IAudioClient closed - Windows mic tray icon OFF",
                 Color.FromArgb(34, 197, 94),
                 2400
@@ -348,7 +371,7 @@ public sealed class ConsoleSessionForm : Form
         {
             _toastForm.ShowToast(
                 this,
-                "\U0001F399\uFE0F Host Microphone: LIVE STREAMING",
+                "[LIVE] Host Microphone: LIVE STREAMING",
                 "Streaming 48 kHz PCM over AF_HYPERV to Guest VM",
                 Color.FromArgb(239, 68, 68),
                 2400
@@ -358,7 +381,7 @@ public sealed class ConsoleSessionForm : Form
         {
             _toastForm.ShowToast(
                 this,
-                "\U0001F7E1 Host Microphone: ARMED (KSSTATE Gate)",
+                "[ARMED] Host Microphone: ARMED (KSSTATE Gate)",
                 "Host mic will open automatically when a Guest app records",
                 Color.FromArgb(234, 179, 8),
                 2400
@@ -395,6 +418,8 @@ public sealed class ConsoleSessionForm : Form
         _audioTransport.Dispose();
         _touchTransport.Dispose();
         _rdpControl.DisconnectConsole();
+
+        try { timeEndPeriod(1); } catch { }
 
         base.OnFormClosing(e);
     }

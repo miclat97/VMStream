@@ -2,10 +2,19 @@
 // Adapter.cpp - PortCls Adapter Driver, Subdevice Registration & IOCTL Bridge
 // Project: VMStream - Guest Virtual Audio Driver (HvVirtualAudio.sys)
 // ============================================================================
+#define PUT_GUIDS_HERE
+#define INITGUID
 #include "AudioCommon.h"
 #include "TopologyMiniport.h"
 #include "WaveRTMiniport.h"
 #include <wdmsec.h>
+
+void __cdecl operator delete(PVOID pVoid, size_t /*cbSize*/) noexcept
+{
+    if (pVoid != NULL) {
+        ExFreePool(pVoid);
+    }
+}
 
 class CAdapterCommon;
 

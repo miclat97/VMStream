@@ -2,9 +2,11 @@
 .SYNOPSIS
     Automatically detects, downloads, and installs all build prerequisites for VMStream:
       1. .NET 8.0 SDK (x64)
-      2. Visual Studio 2022 Build Tools (MSBuild + MSVC v143 x64 C++20 compiler + Spectre libs)
+      2. Visual Studio 2022 Build Tools (MSBuild + MSVC v143 x64 C++20 compiler)
       3. Windows 10/11 SDK (headers & libraries for Winsock2 / AF_HYPERV / SetupAPI)
-      4. Windows Driver Kit (WDK) + MSBuild WindowsKernelModeDriver10.0 VSIX integration
+      4. Windows Driver Kit (WDK) headers & libraries (checks installed Windows Kits first,
+         and automatically downloads & extracts official Microsoft.Windows.WDK.x64 +
+         Microsoft.Windows.SDK.CPP NuGet packages if ntddk.h / vhf.h / portcls.h are missing).
 
 .DESCRIPTION
     Can be run standalone or invoked automatically by scripts\Build-All.ps1.
@@ -18,7 +20,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$LocalWdkKitRoot = Join-Path $RepoRoot "build\wdk_kit"
 
 function Test-IsAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -34,6 +40,39 @@ function Refresh-SessionPath {
         if (-not [string]::IsNullOrWhiteSpace($entry) -and ($env:PATH -notlike "*$entry*")) {
             $env:PATH = "$entry;$env:PATH"
         }
+    }
+}
+
+function Extract-NuGetPackageContent {
+    param(
+        [Parameter(Mandatory = $true)][string]$NupkgFile,
+        [Parameter(Mandatory = $true)][string]$TargetRoot
+    )
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($NupkgFile)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $fullName = $entry.FullName -replace '\\', '/'
+            if ([string]::IsNullOrEmpty($entry.Name)) { continue }
+
+            $relPath = $null
+            if ($fullName.StartsWith("c/", [StringComparison]::OrdinalIgnoreCase)) {
+                $relPath = $fullName.Substring(2)
+            } elseif ($fullName.StartsWith("build/", [StringComparison]::OrdinalIgnoreCase)) {
+                $relPath = $fullName
+            }
+
+            if ($relPath) {
+                $destPath = Join-Path $TargetRoot ($relPath -replace '/', '\')
+                $destDir  = Split-Path -Parent $destPath
+                if (-not (Test-Path $destDir)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destPath, $true)
+            }
+        }
+    } finally {
+        $archive.Dispose()
     }
 }
 
@@ -230,151 +269,192 @@ Write-Host "      -> Using MSBuild : $($VsInfo.MsBuildExe)" -ForegroundColor Gre
 Write-Host "      -> Using MSVC cl : $($VsInfo.ClExe)"      -ForegroundColor Green
 
 # ============================================================================
-# 3. Ensure Windows 10/11 SDK is Installed
+# 3. Ensure Windows 10/11 User-Mode SDK is Installed
 # ============================================================================
 Write-Host "`n[Prereq 3/4] Checking Windows 10/11 SDK..." -ForegroundColor Yellow
 
-$KitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
+$SystemKitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
 
-function Find-WindowsSdkVersion {
-    $incRoot = Join-Path $KitsRoot "Include"
-    if (-not (Test-Path $incRoot)) { return $null }
-    $vers = Get-ChildItem -Path $incRoot -Directory | Where-Object {
-        $_.Name -match "^10\.0\.\d+\.\d+$" -and (Test-Path (Join-Path $_.FullName "um\winsock2.h"))
-    } | Sort-Object Name -Descending
-    if ($vers) { return $vers[0].Name }
+function Find-WindowsSdkLayout {
+    foreach ($root in @($SystemKitsRoot, $LocalWdkKitRoot)) {
+        $incRoot = Join-Path $root "Include"
+        if (-not (Test-Path $incRoot)) { continue }
+        $vers = Get-ChildItem -Path $incRoot -Directory | Where-Object {
+            $_.Name -match "^10\.0\.\d+\.\d+$" -and (Test-Path (Join-Path $_.FullName "um\winsock2.h"))
+        } | Sort-Object Name -Descending
+        if ($vers) {
+            return [PSCustomObject]@{
+                KitsRoot   = $root
+                SdkVersion = $vers[0].Name
+            }
+        }
+    }
     return $null
 }
 
-$SdkVersion = Find-WindowsSdkVersion
-if (-not $SdkVersion) {
-    if (-not (Test-IsAdmin)) {
-        Invoke-SelfElevatedIfNeeded | Out-Null
-        $SdkVersion = Find-WindowsSdkVersion
-    }
+$SdkLayout = Find-WindowsSdkLayout
+if (-not $SdkLayout) {
+    Write-Host "      -> Windows SDK not found in system Kits; downloading official Microsoft.Windows.SDK.CPP NuGet packages..." -ForegroundColor Cyan
+    New-Item -ItemType Directory -Path $LocalWdkKitRoot -Force | Out-Null
+    $SdkCppNupkg = Join-Path $env:TEMP "microsoft.windows.sdk.cpp.10.0.26100.4204.nupkg"
+    $SdkX64Nupkg = Join-Path $env:TEMP "microsoft.windows.sdk.cpp.x64.10.0.26100.4204.nupkg"
+    Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp/10.0.26100.4204/microsoft.windows.sdk.cpp.10.0.26100.4204.nupkg" -OutFile $SdkCppNupkg -UseBasicParsing
+    Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp.x64/10.0.26100.4204/microsoft.windows.sdk.cpp.x64.10.0.26100.4204.nupkg" -OutFile $SdkX64Nupkg -UseBasicParsing
+    Extract-NuGetPackageContent -NupkgFile $SdkCppNupkg -TargetRoot $LocalWdkKitRoot
+    Extract-NuGetPackageContent -NupkgFile $SdkX64Nupkg -TargetRoot $LocalWdkKitRoot
+    $SdkLayout = Find-WindowsSdkLayout
 }
 
-if (-not $SdkVersion) {
-    Write-Host "      -> Windows SDK not found. Installing Windows 11 SDK (10.0.22621.0)..." -ForegroundColor Cyan
-    $SdkSetup = Join-Path $env:TEMP "winsdksetup.exe"
-    Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2196241" -OutFile $SdkSetup -UseBasicParsing
-    Start-Process -FilePath $SdkSetup -ArgumentList "/features OptionId.DesktopCPPx64 OptionId.SigningTools /quiet /norestart" -Wait
-
-    $SdkVersion = Find-WindowsSdkVersion
-    if (-not $SdkVersion) {
-        throw "Failed to install Windows 10/11 SDK under $KitsRoot."
-    }
+if (-not $SdkLayout) {
+    throw "Failed to locate or install Windows 10/11 SDK."
 }
 
-Write-Host "      -> Using Windows SDK Version: $SdkVersion" -ForegroundColor Green
+$KitsRoot   = $SdkLayout.KitsRoot
+$SdkVersion = $SdkLayout.SdkVersion
+Write-Host "      -> Using Windows SDK: $SdkVersion ($KitsRoot)" -ForegroundColor Green
 
 # ============================================================================
-# 4. Ensure Windows Driver Kit (WDK) & MSBuild Kernel Toolset Integration
+# 4. Ensure Windows Driver Kit (WDK) Kernel Headers & Libraries
 # ============================================================================
-$WdkVersion = $null
-$KmdfVersion = "1.31"
+$WdkLayout = $null
 
 if (-not $SkipWdk) {
     Write-Host "`n[Prereq 4/4] Checking Windows Driver Kit (WDK) for HvTouchHid.sys & HvVirtualAudio.sys..." -ForegroundColor Yellow
 
-    function Find-WdkVersion {
-        $incRoot = Join-Path $KitsRoot "Include"
-        if (-not (Test-Path $incRoot)) { return $null }
-        $vers = Get-ChildItem -Path $incRoot -Directory | Where-Object {
-            $_.Name -match "^10\.0\.\d+\.\d+$" -and
-            (Test-Path (Join-Path $_.FullName "km\ntddk.h")) -and
-            (Test-Path (Join-Path $_.FullName "km\vhf.h")) -and
-            (Test-Path (Join-Path $_.FullName "km\portcls.h"))
-        } | Sort-Object Name -Descending
-        if ($vers) { return $vers[0].Name }
+    function Find-WdkLayout {
+        foreach ($root in @($SystemKitsRoot, $LocalWdkKitRoot)) {
+            if (-not (Test-Path $root)) { continue }
+            $incRoot = Join-Path $root "Include"
+            $libRoot = Join-Path $root "Lib"
+            if (-not (Test-Path $incRoot) -or -not (Test-Path $libRoot)) { continue }
+
+            # Find version directory containing km\ntddk.h, km\vhf.h, and km\portcls.h
+            $incVerDir = Get-ChildItem -Path $incRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+                (Test-Path (Join-Path $_.FullName "km\ntddk.h")) -and
+                (Test-Path (Join-Path $_.FullName "km\vhf.h")) -and
+                (Test-Path (Join-Path $_.FullName "km\portcls.h"))
+            } | Sort-Object Name -Descending | Select-Object -First 1
+
+            # Also check if shared\hidport.h is in this root or in SystemKitsRoot
+            if (-not $incVerDir) { continue }
+
+            $libVerDir = Get-ChildItem -Path $libRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+                (Test-Path (Join-Path $_.FullName "km\x64\ntoskrnl.lib")) -and
+                (Test-Path (Join-Path $_.FullName "km\x64\vhfkm.lib")) -and
+                (Test-Path (Join-Path $_.FullName "km\x64\portcls.lib"))
+            } | Sort-Object Name -Descending | Select-Object -First 1
+
+            if (-not $libVerDir) { continue }
+
+            # Locate KMDF headers (wdf.h) and libraries (WdfDriverEntry.lib) - prefer 1.31 if present for broad Win10/11 compatibility, else latest
+            $kmdfIncRoot = Join-Path $incRoot "wdf\kmdf"
+            $kmdfLibRoot = Join-Path $libRoot "wdf\kmdf\x64"
+            if (-not (Test-Path $kmdfIncRoot) -or -not (Test-Path $kmdfLibRoot)) { continue }
+
+            $kmdfVer = "1.31"
+            if (-not (Test-Path (Join-Path $kmdfIncRoot "1.31\wdf.h")) -or -not (Test-Path (Join-Path $kmdfLibRoot "1.31\WdfDriverEntry.lib"))) {
+                $latestKmdfDir = Get-ChildItem -Path $kmdfIncRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+                    Test-Path (Join-Path $_.FullName "wdf.h")
+                } | Sort-Object Name -Descending | Select-Object -First 1
+                if ($latestKmdfDir) {
+                    $kmdfVer = $latestKmdfDir.Name
+                } else {
+                    continue
+                }
+            }
+
+            # Locate shared headers (hidport.h, ks.h, ksmedia.h, ntdef.h)
+            $sharedIncDir = Join-Path $incVerDir.FullName "shared"
+            if (-not (Test-Path (Join-Path $sharedIncDir "ntdef.h"))) {
+                # Fallback to SystemKitsRoot shared if needed
+                $sysShared = Join-Path $SystemKitsRoot "Include\$SdkVersion\shared"
+                if (Test-Path (Join-Path $sysShared "ntdef.h")) {
+                    $sharedIncDir = $sysShared
+                }
+            }
+
+            return [PSCustomObject]@{
+                WdkRoot       = $root
+                WdkVersion    = $incVerDir.Name
+                KmIncDir      = Join-Path $incVerDir.FullName "km"
+                KmCrtIncDir   = Join-Path $incVerDir.FullName "km\crt"
+                SharedIncDir  = $sharedIncDir
+                KmLibDir      = Join-Path $libVerDir.FullName "km\x64"
+                KmdfVersion   = $kmdfVer
+                KmdfIncDir    = Join-Path $kmdfIncRoot $kmdfVer
+                KmdfLibDir    = Join-Path $kmdfLibRoot $kmdfVer
+            }
+        }
         return $null
     }
 
-    $WdkVersion = Find-WdkVersion
+    $WdkLayout = Find-WdkLayout
 
-    if (-not $WdkVersion) {
-        if (-not (Test-IsAdmin)) {
-            Invoke-SelfElevatedIfNeeded | Out-Null
-            $WdkVersion = Find-WdkVersion
+    if (-not $WdkLayout) {
+        Write-Host "      -> WDK kernel headers/libs not found in '$SystemKitsRoot'." -ForegroundColor Cyan
+        Write-Host "      -> Auto-downloading official Microsoft WDK & SDK C++ NuGet packages to '$LocalWdkKitRoot'..." -ForegroundColor Cyan
+
+        New-Item -ItemType Directory -Path $LocalWdkKitRoot -Force | Out-Null
+
+        $NuGetPackages = @(
+            @{
+                Name = "Microsoft.Windows.SDK.CPP (10.0.26100.4204)"
+                Url  = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.cpp/10.0.26100.4204/microsoft.windows.sdk.cpp.10.0.26100.4204.nupkg"
+                File = Join-Path $env:TEMP "microsoft.windows.sdk.cpp.10.0.26100.4204.nupkg"
+            },
+            @{
+                Name = "Microsoft.Windows.WDK.x64 (10.0.26100.4204)"
+                Url  = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.wdk.x64/10.0.26100.4204/microsoft.windows.wdk.x64.10.0.26100.4204.nupkg"
+                File = Join-Path $env:TEMP "microsoft.windows.wdk.x64.10.0.26100.4204.nupkg"
+            }
+        )
+
+        foreach ($pkg in $NuGetPackages) {
+            if (-not (Test-Path $pkg.File) -or ((Get-Item $pkg.File).Length -lt 1000000)) {
+                Write-Host "      -> Downloading $($pkg.Name) from api.nuget.org ..." -ForegroundColor Cyan
+                Invoke-WebRequest -Uri $pkg.Url -OutFile $pkg.File -UseBasicParsing
+            }
+            Write-Host "      -> Extracting $($pkg.Name) into '$LocalWdkKitRoot'..." -ForegroundColor Cyan
+            Extract-NuGetPackageContent -NupkgFile $pkg.File -TargetRoot $LocalWdkKitRoot
         }
-    }
 
-    if (-not $WdkVersion) {
-
-        Write-Host "      -> Windows Driver Kit (WDK) not found. Downloading & installing WDK (10.0.22621.0)..." -ForegroundColor Cyan
-        $installedWdkWinget = $false
-        $wingetCmd = Get-Command winget.exe -ErrorAction SilentlyContinue
-        if ($wingetCmd) {
+        # Also copy into SystemKitsRoot if running as Administrator and SystemKitsRoot lacks km\ntddk.h
+        if (Test-IsAdmin -and (Test-Path $SystemKitsRoot)) {
             try {
-                & winget.exe install --id Microsoft.WindowsWDK.10.0.22621 --exact --silent --accept-package-agreements --accept-source-agreements
-                $WdkVersion = Find-WdkVersion
-                if ($WdkVersion) { $installedWdkWinget = $true }
+                Copy-Item -Path "$LocalWdkKitRoot\Include\*" -Destination (Join-Path $SystemKitsRoot "Include") -Recurse -Force -ErrorAction SilentlyContinue
+                Copy-Item -Path "$LocalWdkKitRoot\Lib\*"     -Destination (Join-Path $SystemKitsRoot "Lib")     -Recurse -Force -ErrorAction SilentlyContinue
             } catch { }
         }
 
-        if (-not $installedWdkWinget) {
-            $WdkSetup = Join-Path $env:TEMP "wdksetup.exe"
-            Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2249371" -OutFile $WdkSetup -UseBasicParsing
-            Write-Host "      -> Running wdksetup.exe /features + /quiet /norestart ..." -ForegroundColor Cyan
-            Start-Process -FilePath $WdkSetup -ArgumentList "/features + /quiet /norestart" -Wait
-            $WdkVersion = Find-WdkVersion
-        }
+        $WdkLayout = Find-WdkLayout
     }
 
-    if ($WdkVersion) {
-        Write-Host "      -> Using WDK Version: $WdkVersion" -ForegroundColor Green
-
-        # Detect installed KMDF version (e.g. 1.31 or 1.33)
-        $kmdfIncBase = Join-Path $KitsRoot "Include\wdf\kmdf"
-        if (Test-Path $kmdfIncBase) {
-            $latestKmdf = Get-ChildItem -Path $kmdfIncBase -Directory | Sort-Object Name -Descending | Select-Object -First 1
-            if ($latestKmdf) { $KmdfVersion = $latestKmdf.Name }
-        }
-
-        # Ensure WindowsKernelModeDriver10.0 MSBuild PlatformToolset is registered in VS/BuildTools
-        $VcTargetsDir = Join-Path $VsInfo.InstallPath "MSBuild\Microsoft\VC\v170"
-        $KernelToolsetTargets = Join-Path $VcTargetsDir "Platforms\x64\PlatformToolsets\WindowsKernelModeDriver10.0\Toolset.targets"
-
-        if (-not (Test-Path $KernelToolsetTargets)) {
-            Write-Host "      -> Integrating WDK MSBuild Toolset (WindowsKernelModeDriver10.0) into Visual Studio..." -ForegroundColor Cyan
-            $VsixFile = Get-ChildItem -Path (Join-Path $KitsRoot "Vsix") -Recurse -Filter "WDK.vsix" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($VsixFile -and (Test-IsAdmin)) {
-                $ExtractDir = Join-Path $env:TEMP "VMStream_WDK_Vsix_Extract"
-                if (Test-Path $ExtractDir) { Remove-Item -Path $ExtractDir -Recurse -Force }
-                New-Item -ItemType Directory -Path $ExtractDir -Force | Out-Null
-
-                $TempZip = Join-Path $env:TEMP "WDK_vsix.zip"
-                Copy-Item -Path $VsixFile.FullName -Destination $TempZip -Force
-                Expand-Archive -Path $TempZip -DestinationPath $ExtractDir -Force
-                Remove-Item -Path $TempZip -Force -ErrorAction SilentlyContinue
-
-                $VsixMsBuildSrc = Join-Path $ExtractDir '$MSBuild\Microsoft\VC\v170'
-                if (-not (Test-Path $VsixMsBuildSrc)) {
-                    $VsixMsBuildSrc = Get-ChildItem -Path $ExtractDir -Recurse -Directory | Where-Object { $_.FullName -like "*Microsoft\VC\v170" } | Select-Object -First 1 -ExpandProperty FullName
-                }
-
-                if ($VsixMsBuildSrc -and (Test-Path $VsixMsBuildSrc)) {
-                    Copy-Item -Path "$VsixMsBuildSrc\*" -Destination $VcTargetsDir -Recurse -Force
-                    Write-Host "      -> Extracted WindowsKernelModeDriver10.0 MSBuild targets to: $VcTargetsDir" -ForegroundColor Green
-                }
-                Remove-Item -Path $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        }
+    if ($WdkLayout) {
+        Write-Host "      -> Using WDK Version : $($WdkLayout.WdkVersion) ($($WdkLayout.WdkRoot))" -ForegroundColor Green
+        Write-Host "      -> Using KMDF Version: $($WdkLayout.KmdfVersion)" -ForegroundColor Green
+        Write-Host "      -> Kernel Include    : $($WdkLayout.KmIncDir)" -ForegroundColor Green
+        Write-Host "      -> Kernel Libs (x64) : $($WdkLayout.KmLibDir)" -ForegroundColor Green
     } else {
-        Write-Warning "WDK kernel headers were not found under $KitsRoot. Kernel drivers (.sys) will be skipped unless WDK is installed."
+        throw "Failed to locate or extract WDK kernel headers (ntddk.h, vhf.h, portcls.h)."
     }
 }
 
 # Return discovered toolchain metadata for Build-All.ps1
 return [PSCustomObject]@{
-    DotNetExe    = $DotNetExe
-    VsInstallDir = $VsInfo.InstallPath
-    MsBuildExe   = $VsInfo.MsBuildExe
-    ClExe        = $VsInfo.ClExe
-    LinkExe      = $VsInfo.LinkExe
-    MsvcRoot     = $VsInfo.MsvcRoot
-    KitsRoot     = $KitsRoot
-    SdkVersion   = $SdkVersion
-    WdkVersion   = $WdkVersion
-    KmdfVersion  = $KmdfVersion
+    DotNetExe     = $DotNetExe
+    VsInstallDir  = $VsInfo.InstallPath
+    MsBuildExe    = $VsInfo.MsBuildExe
+    ClExe         = $VsInfo.ClExe
+    LinkExe       = $VsInfo.LinkExe
+    MsvcRoot      = $VsInfo.MsvcRoot
+    KitsRoot      = $KitsRoot
+    SdkVersion    = $SdkVersion
+    WdkVersion    = if ($WdkLayout) { $WdkLayout.WdkVersion }   else { $null }
+    KmdfVersion   = if ($WdkLayout) { $WdkLayout.KmdfVersion }  else { "1.31" }
+    WdkKmInc      = if ($WdkLayout) { $WdkLayout.KmIncDir }     else { $null }
+    WdkKmCrtInc   = if ($WdkLayout) { $WdkLayout.KmCrtIncDir }  else { $null }
+    WdkSharedInc  = if ($WdkLayout) { $WdkLayout.SharedIncDir } else { $null }
+    WdkKmLib      = if ($WdkLayout) { $WdkLayout.KmLibDir }     else { $null }
+    KmdfInc       = if ($WdkLayout) { $WdkLayout.KmdfIncDir }   else { $null }
+    KmdfLib       = if ($WdkLayout) { $WdkLayout.KmdfLibDir }   else { $null }
 }

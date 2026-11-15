@@ -134,7 +134,105 @@ static const uint8_t g_HvTouchReportDescriptor[] = {
     0x96, 0x00, 0x01,                   //   Report Count (256)
     0xB1, 0x02,                         //   Feature (Data,Var,Abs)
 
-    0xC0                                // End Collection (Application)
+    0xC0,                               // End Collection (Application - Touch Screen)
+
+    // =========================================================================
+    // TOP-LEVEL COLLECTION 2: High-Resolution Scroll Mouse (Report ID 0x04 / 0x05)
+    // Delivers native WM_MOUSEHWHEEL (AC Pan) & hi-res scroll via mouhid.sys
+    // across all Guest sessions, including UAC prompts and Lock Screen.
+    // =========================================================================
+    0x05, 0x01,                         // Usage Page (Generic Desktop)
+    0x09, 0x02,                         // Usage (Mouse)
+    0xA1, 0x01,                         // Collection (Application)
+    0x09, 0x01,                         //   Usage (Pointer)
+    0xA1, 0x00,                         //   Collection (Physical)
+
+    // Reset inherited global items from Touch Screen TLC (Unit / Exponent / Physical)
+    0x55, 0x00,                         //     Unit Exponent (0)
+    0x65, 0x00,                         //     Unit (None)
+    0x35, 0x00,                         //     Physical Minimum (0)
+    0x45, 0x00,                         //     Physical Maximum (0)
+
+    0x85, HV_TOUCH_REPORT_ID_MOUSE,     //     Report ID (4)
+
+    // 3 Buttons (3 bits) + 5 bits constant padding = 1 byte
+    0x05, 0x09,                         //     Usage Page (Button)
+    0x19, 0x01,                         //     Usage Minimum (Button 1)
+    0x29, 0x03,                         //     Usage Maximum (Button 3)
+    0x15, 0x00,                         //     Logical Minimum (0)
+    0x25, 0x01,                         //     Logical Maximum (1)
+    0x95, 0x03,                         //     Report Count (3)
+    0x75, 0x01,                         //     Report Size (1)
+    0x81, 0x02,                         //     Input (Data,Var,Abs)
+    0x95, 0x01,                         //     Report Count (1)
+    0x75, 0x05,                         //     Report Size (5)
+    0x81, 0x03,                         //     Input (Const,Var,Abs)
+
+    // Relative X, Y (8-bit signed, 2 bytes; always 0 when injecting pan/wheel)
+    0x05, 0x01,                         //     Usage Page (Generic Desktop)
+    0x09, 0x30,                         //     Usage (X)
+    0x09, 0x31,                         //     Usage (Y)
+    0x15, 0x81,                         //     Logical Minimum (-127)
+    0x25, 0x7F,                         //     Logical Maximum (127)
+    0x75, 0x08,                         //     Report Size (8)
+    0x95, 0x02,                         //     Report Count (2)
+    0x81, 0x06,                         //     Input (Data,Var,Rel)
+
+    // Vertical Wheel (Usage 0x38, 16-bit signed) + Resolution Multiplier (Report ID 5)
+    0xA1, 0x02,                         //     Collection (Logical) - Vertical Wheel
+    0x09, 0x48,                         //       Usage (Resolution Multiplier)
+    0x85, HV_TOUCH_REPORT_ID_MOUSE_RES_MULT, // Report ID (5)
+    0x95, 0x01,                         //       Report Count (1)
+    0x75, 0x02,                         //       Report Size (2)
+    0x15, 0x00,                         //       Logical Minimum (0)
+    0x25, 0x01,                         //       Logical Maximum (1)
+    0x35, 0x01,                         //       Physical Minimum (1)
+    0x45, 0x78,                         //       Physical Maximum (120)
+    0xB1, 0x02,                         //       Feature (Data,Var,Abs)
+
+    0x85, HV_TOUCH_REPORT_ID_MOUSE,     //       Report ID (4)
+    0x09, 0x38,                         //       Usage (Wheel)
+    0x35, 0x00,                         //       Physical Minimum (0)
+    0x45, 0x00,                         //       Physical Maximum (0)
+    0x16, 0x01, 0x80,                   //       Logical Minimum (-32767)
+    0x26, 0xFF, 0x7F,                   //       Logical Maximum (32767)
+    0x75, 0x10,                         //       Report Size (16)
+    0x95, 0x01,                         //       Report Count (1)
+    0x81, 0x06,                         //       Input (Data,Var,Rel)
+    0xC0,                               //     End Collection (Logical)
+
+    // Horizontal AC Pan (Usage Page 0x0C, Usage 0x0238, 16-bit signed) + Resolution Multiplier
+    0xA1, 0x02,                         //     Collection (Logical) - Horizontal AC Pan
+    0x05, 0x01,                         //       Usage Page (Generic Desktop)
+    0x09, 0x48,                         //       Usage (Resolution Multiplier)
+    0x85, HV_TOUCH_REPORT_ID_MOUSE_RES_MULT, // Report ID (5)
+    0x95, 0x01,                         //       Report Count (1)
+    0x75, 0x02,                         //       Report Size (2)
+    0x15, 0x00,                         //       Logical Minimum (0)
+    0x25, 0x01,                         //       Logical Maximum (1)
+    0x35, 0x01,                         //       Physical Minimum (1)
+    0x45, 0x78,                         //       Physical Maximum (120)
+    0xB1, 0x02,                         //       Feature (Data,Var,Abs)
+
+    // 4-bit padding in Feature Report 0x05 so feature report payload is 8 bits total
+    0x35, 0x00,                         //       Physical Minimum (0)
+    0x45, 0x00,                         //       Physical Maximum (0)
+    0x75, 0x04,                         //       Report Size (4)
+    0x95, 0x01,                         //       Report Count (1)
+    0xB1, 0x03,                         //       Feature (Const,Var,Abs)
+
+    0x85, HV_TOUCH_REPORT_ID_MOUSE,     //       Report ID (4)
+    0x05, 0x0C,                         //       Usage Page (Consumer)
+    0x0A, 0x38, 0x02,                   //       Usage (AC Pan)
+    0x16, 0x01, 0x80,                   //       Logical Minimum (-32767)
+    0x26, 0xFF, 0x7F,                   //       Logical Maximum (32767)
+    0x75, 0x10,                         //       Report Size (16)
+    0x95, 0x01,                         //       Report Count (1)
+    0x81, 0x06,                         //       Input (Data,Var,Rel)
+    0xC0,                               //     End Collection (Logical)
+
+    0xC0,                               //   End Collection (Physical)
+    0xC0                                // End Collection (Application - Mouse)
 };
 
 // Standard Microsoft WDK Touch Hardware Quality Assurance (THQA) 256-byte blob

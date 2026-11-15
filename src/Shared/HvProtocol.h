@@ -11,6 +11,7 @@
     typedef UINT16  uint16_t;
     typedef UINT32  uint32_t;
     typedef UINT64  uint64_t;
+    typedef INT8    int8_t;
     typedef INT16   int16_t;
     typedef INT32   int32_t;
 #else
@@ -94,6 +95,10 @@ DEFINE_GUID(GUID_DEVINTERFACE_HVAUDIO,
 // Releases all active touch contacts immediately (anti-stuck-finger safeguard)
 #define IOCTL_HVTOUCH_RESET_CONTACTS \
     CTL_CODE(FILE_DEVICE_HVTOUCH, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// Submits high-resolution horizontal/vertical scroll deltas via the HID Mouse TLC
+#define IOCTL_HVTOUCH_SUBMIT_MOUSE_SCROLL \
+    CTL_CODE(FILE_DEVICE_HVTOUCH, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // Reads rendered speaker PCM frames from the Guest WaveRT Render ring buffer
 #define IOCTL_HVAUDIO_READ_RENDER_PCM \
@@ -186,7 +191,7 @@ __inline uint32_t HvAudioPeriodBytesStereo16ForRate(uint32_t sampleRate)
 }
 
 // ============================================================================
-// 4. Multi-Touch HID Constants
+// 4. Multi-Touch & Mouse Scroll HID Constants
 // ============================================================================
 
 #define HV_MAX_TOUCH_CONTACTS               10
@@ -194,6 +199,8 @@ __inline uint32_t HvAudioPeriodBytesStereo16ForRate(uint32_t sampleRate)
 #define HV_TOUCH_REPORT_ID_INPUT            0x01
 #define HV_TOUCH_REPORT_ID_MAX_COUNT        0x02
 #define HV_TOUCH_REPORT_ID_THQA_CERT        0x03
+#define HV_TOUCH_REPORT_ID_MOUSE            0x04
+#define HV_TOUCH_REPORT_ID_MOUSE_RES_MULT   0x05
 
 // ============================================================================
 // 5. Packed Wire Protocol Structures
@@ -209,7 +216,8 @@ enum HV_PACKET_TYPE : uint8_t {
     HvPacketType_AudioCapturePcm    = 0x11, // Host -> Guest: Microphone PCM audio frame
     HvPacketType_AudioControl       = 0x12, // Bidirectional: KSSTATE_RUN / Mic Gate / Sample Rate state
     HvPacketType_TouchFrame         = 0x20, // Host -> Guest: 64-byte HID Multi-Touch Input Report
-    HvPacketType_TouchReset         = 0x21  // Host -> Guest: Zero all touch contacts immediately
+    HvPacketType_TouchReset         = 0x21, // Host -> Guest: Zero all touch contacts immediately
+    HvPacketType_MouseScroll        = 0x22  // Host -> Guest: Touchpad / Mouse Horizontal (and optional Vertical) Scroll
 };
 
 enum HV_AUDIO_FLAGS : uint16_t {
@@ -300,5 +308,39 @@ typedef struct _HV_TOUCH_CERT_FEATURE {
 } HV_TOUCH_CERT_FEATURE, *PHV_TOUCH_CERT_FEATURE;
 
 static_assert(sizeof(HV_TOUCH_CERT_FEATURE) == 257, "HV_TOUCH_CERT_FEATURE must be 257 bytes");
+
+// Wire & IOCTL payload for high-resolution mouse/touchpad scroll (8 bytes)
+// Win32 WM_MOUSEHWHEEL convention: positive HorizontalDelta = right, negative = left (120 = 1 detent)
+typedef struct _HV_MOUSE_SCROLL_PAYLOAD {
+    int16_t  HorizontalDelta;   // Signed Win32 WM_MOUSEHWHEEL delta
+    int16_t  VerticalDelta;     // Signed Win32 WM_MOUSEWHEEL delta (0 when H-scroll only)
+    uint16_t KeyState;          // Low word of wParam (MK_CONTROL, MK_SHIFT, etc.)
+    uint16_t Flags;             // Reserved (0)
+} HV_MOUSE_SCROLL_PAYLOAD, *PHV_MOUSE_SCROLL_PAYLOAD;
+
+static_assert(sizeof(HV_MOUSE_SCROLL_PAYLOAD) == 8, "HV_MOUSE_SCROLL_PAYLOAD must be 8 bytes");
+
+// HID Mouse Input Report (Report ID 0x04, 8 bytes)
+typedef struct _HV_MOUSE_INPUT_REPORT {
+    uint8_t ReportId;   // Always 0x04 (HV_TOUCH_REPORT_ID_MOUSE)
+    uint8_t Buttons;    // Bits 0..2: Left/Right/Middle, Bits 3..7: Padding (0)
+    int8_t  DeltaX;     // Always 0 (cursor remains on RDP channel)
+    int8_t  DeltaY;     // Always 0
+    int16_t Wheel;      // Signed vertical wheel (-32767..32767)
+    int16_t Pan;        // Signed AC Pan horizontal scroll (-32767..32767; positive = right)
+} HV_MOUSE_INPUT_REPORT, *PHV_MOUSE_INPUT_REPORT;
+
+static_assert(sizeof(HV_MOUSE_INPUT_REPORT) == 8, "HV_MOUSE_INPUT_REPORT must be 8 bytes");
+
+// Feature Report 0x05: HID Wheel & AC Pan Resolution Multipliers (2 bytes)
+// Bits 0..1: Vertical Wheel Resolution Multiplier (0 = 1x, 1 = 120x hi-res)
+// Bits 2..3: Horizontal AC Pan Resolution Multiplier (0 = 1x, 1 = 120x hi-res)
+// Bits 4..7: Padding (0)
+typedef struct _HV_MOUSE_RES_MULT_FEATURE {
+    uint8_t ReportId;       // Always 0x05 (HV_TOUCH_REPORT_ID_MOUSE_RES_MULT)
+    uint8_t Multipliers;
+} HV_MOUSE_RES_MULT_FEATURE, *PHV_MOUSE_RES_MULT_FEATURE;
+
+static_assert(sizeof(HV_MOUSE_RES_MULT_FEATURE) == 2, "HV_MOUSE_RES_MULT_FEATURE must be 2 bytes");
 
 #pragma pack(pop)

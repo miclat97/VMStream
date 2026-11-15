@@ -502,7 +502,7 @@ public sealed class RdpConsoleControl : AxHost
     /// ConnectCallback) in Basic Console Session mode on localhost:2179, while keeping
     /// VMStream's AF_HYPERV touch/audio isolation.
     /// </summary>
-    public void ConnectToHyperVConsole(Guid vmGuid, string? vmName = null)
+    public void ConnectToHyperVConsole(Guid vmGuid, string? vmName = null, bool disableTouchRemoting = true)
     {
         if (!IsHandleCreated)
         {
@@ -616,8 +616,8 @@ public sealed class RdpConsoleControl : AxHost
                 TrySetExtendedProperty(extSettings, "EnableFrameBufferRedirection", true);
             }
 
-            // VMStream isolation: touch is handled over VM-isolated AF_HYPERV HID bridge
-            TrySetExtendedProperty(extSettings, "DisableTouchRemoting", true);
+            // VMStream isolation: touch is handled over VM-isolated AF_HYPERV HID bridge when enabled
+            TrySetExtendedProperty(extSettings, "DisableTouchRemoting", disableTouchRemoting);
         }
 
         SetAdvProperty(advDisp, fallbackAdv, a => a.GrabFocusOnConnect = false, "GrabFocusOnConnect", false);

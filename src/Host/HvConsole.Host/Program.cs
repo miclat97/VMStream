@@ -9,6 +9,7 @@ using System;
 using System.Windows.Forms;
 using HvConsole.Host.Audio;
 using HvConsole.Host.Input;
+using HvConsole.Host.Protocol;
 using HvConsole.Host.UI;
 using HvConsole.Host.Wmi;
 
@@ -19,16 +20,13 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        // Disable automatic mouse-in-pointer promotion so WM_POINTER touch events
-        // intercepted on IHWindowClass never double-fire as mouse clicks.
-        TouchWindowInterceptor.ConfigureProcessTouchSettings();
-
         ApplicationConfiguration.Initialize();
 
         string? targetVmNameOrGuid = null;
         bool startFullscreen = false;
         bool forceTcpFallback = false;
         AudioSampleRatePreference? audioRatePreference = null;
+        DeviceRedirectionSettings deviceSettings = DeviceRedirectionSettings.Load();
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -69,6 +67,47 @@ internal static class Program
                     audioRatePreference = parsed;
                 }
             }
+            else if (string.Equals(arg, "--no-touch", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableTouchscreen = false;
+            }
+            else if (string.Equals(arg, "--touch", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableTouchscreen = true;
+            }
+            else if (string.Equals(arg, "--no-hscroll", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(arg, "--no-touchpad-scroll", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableTouchpadHorizontalScroll = false;
+            }
+            else if (string.Equals(arg, "--hscroll", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(arg, "--touchpad-scroll", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableTouchpadHorizontalScroll = true;
+            }
+            else if (string.Equals(arg, "--no-speakers", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableSpeakers = false;
+            }
+            else if (string.Equals(arg, "--speakers", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableSpeakers = true;
+            }
+            else if (string.Equals(arg, "--no-mic", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableMicrophone = false;
+            }
+            else if (string.Equals(arg, "--mic", StringComparison.OrdinalIgnoreCase))
+            {
+                deviceSettings.EnableMicrophone = true;
+            }
+        }
+
+        // Disable automatic mouse-in-pointer promotion so WM_POINTER touch events
+        // intercepted on IHWindowClass never double-fire as mouse clicks.
+        if (deviceSettings.EnableTouchscreen || string.IsNullOrWhiteSpace(targetVmNameOrGuid))
+        {
+            TouchWindowInterceptor.ConfigureProcessTouchSettings();
         }
 
         if (!string.IsNullOrWhiteSpace(targetVmNameOrGuid))
@@ -123,11 +162,11 @@ internal static class Program
                 HyperVVmDiscovery.TryStartVirtualMachine(vm.VmId, out _);
             }
 
-            Application.Run(new ConsoleSessionForm(vm, startFullscreen, forceTcpFallback, audioRatePreference));
+            Application.Run(new ConsoleSessionForm(vm, startFullscreen, forceTcpFallback, audioRatePreference, deviceSettings));
             return 0;
         }
 
-        Application.Run(new VmPickerForm(startFullscreen, forceTcpFallback, audioRatePreference));
+        Application.Run(new VmPickerForm(startFullscreen, forceTcpFallback, audioRatePreference, deviceSettings));
         return 0;
     }
 }

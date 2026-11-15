@@ -115,6 +115,8 @@ public sealed class HostAudioEngine : IDisposable
     private readonly AdaptiveJitterBuffer _jitterBuffer = new();
     private readonly object _micStateLock = new();
     private readonly object _renderRestartLock = new();
+    private readonly bool _speakersEnabled;
+    private readonly bool _microphoneAllowed;
 
     private Thread? _renderThread;
     private Thread? _captureThread;
@@ -137,9 +139,12 @@ public sealed class HostAudioEngine : IDisposable
     private volatile bool _isGuestRenderActive;
     private volatile bool _gateMicOnGuestKsState = true;
     private volatile bool _isMicHardwareOpen;
+    private bool _started;
     private bool _disposed;
 
     public AdaptiveJitterBuffer JitterBuffer => _jitterBuffer;
+    public bool SpeakersEnabled => _speakersEnabled;
+    public bool MicrophoneAllowed => _microphoneAllowed;
 
     public float SpeakerVolume
     {
@@ -204,21 +209,33 @@ public sealed class HostAudioEngine : IDisposable
 
     public event Action? StateChanged;
 
-    public HostAudioEngine(IHvTransport audioTransport, AudioSampleRatePreference? initialSampleRate = null)
+    public HostAudioEngine(
+        IHvTransport audioTransport,
+        AudioSampleRatePreference? initialSampleRate = null,
+        bool speakersEnabled = true,
+        bool microphoneAllowed = true)
     {
         _audioTransport = audioTransport;
         _sampleRatePreference = (int)(initialSampleRate ?? AudioRateSettings.LoadSavedPreference());
+        _speakersEnabled = speakersEnabled;
+        _microphoneAllowed = microphoneAllowed;
         _audioTransport.PacketReceived += OnAudioTransportPacketReceived;
         _audioTransport.ConnectionStateChanged += OnAudioTransportConnectionChanged;
     }
 
     public void Start()
     {
-        if (_disposed || _renderThread != null) return;
+        if (_disposed || _started) return;
+        _started = true;
 
         // Enforce strict privacy default on start: Mic OFF and hardware released
         _isMicUserEnabled = false;
         StopAndReleaseMicrophoneHardware();
+
+        if (!_speakersEnabled)
+        {
+            return;
+        }
 
         _renderCts = new CancellationTokenSource();
         CancellationToken stopToken = _renderCts.Token;
@@ -234,6 +251,7 @@ public sealed class HostAudioEngine : IDisposable
 
     public void Stop()
     {
+        _started = false;
         _isMicUserEnabled = false;
         StopAndReleaseMicrophoneHardware();
 
@@ -290,12 +308,23 @@ public sealed class HostAudioEngine : IDisposable
     /// </summary>
     public bool ToggleMicrophonePrivacy()
     {
+        if (!_microphoneAllowed)
+        {
+            SetMicrophonePrivacy(false);
+            return false;
+        }
+
         SetMicrophonePrivacy(!_isMicUserEnabled);
         return _isMicUserEnabled;
     }
 
     public void SetMicrophonePrivacy(bool enabled)
     {
+        if (!_microphoneAllowed)
+        {
+            enabled = false;
+        }
+
         lock (_micStateLock)
         {
             if (_isMicUserEnabled == enabled) return;
@@ -315,7 +344,7 @@ public sealed class HostAudioEngine : IDisposable
         {
             GuestCaptureActive = _isGuestCaptureActive ? (byte)1 : (byte)0,
             GuestRenderActive = _isGuestRenderActive ? (byte)1 : (byte)0,
-            HostMicEnabled = _isMicUserEnabled ? (byte)1 : (byte)0,
+            HostMicEnabled = (_microphoneAllowed && _isMicUserEnabled) ? (byte)1 : (byte)0,
             SampleRateConfig = HvProtocolConstants.PackAudioRateConfig(_sampleRatePreference, 0),
             SequenceGeneration = 0
         };
@@ -334,7 +363,8 @@ public sealed class HostAudioEngine : IDisposable
     {
         lock (_micStateLock)
         {
-            bool shouldOpenHardware = _isMicUserEnabled &&
+            bool shouldOpenHardware = _microphoneAllowed &&
+                                      _isMicUserEnabled &&
                                       _audioTransport.IsConnected &&
                                       (!_gateMicOnGuestKsState || _isGuestCaptureActive);
 
@@ -413,7 +443,8 @@ public sealed class HostAudioEngine : IDisposable
                 _activeGuestRenderSampleRate = rate;
             }
 
-            if (((HvAudioFlags)frameHdr.Flags & HvAudioFlags.Silence) == 0 &&
+            if (_speakersEnabled &&
+                ((HvAudioFlags)frameHdr.Flags & HvAudioFlags.Silence) == 0 &&
                 frameHdr.Channels == HvProtocolConstants.AudioChannelsStereo &&
                 frameHdr.BitsPerSample == HvProtocolConstants.AudioBitsPerSample16)
             {

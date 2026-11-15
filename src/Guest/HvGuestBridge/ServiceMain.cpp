@@ -194,6 +194,39 @@ static bool IsDeviceSymbolicLinkAvailable(const wchar_t* devicePath)
     return false;
 }
 
+static bool DoesHvTouchSupportMouseScroll()
+{
+    HANDLE h = CreateFileW(
+        HVTOUCH_WIN32_DEVICE_PATH,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr
+    );
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    HV_MOUSE_SCROLL_PAYLOAD probe{};
+    DWORD bytesReturned = 0;
+    BOOL ok = DeviceIoControl(
+        h,
+        IOCTL_HVTOUCH_SUBMIT_MOUSE_SCROLL,
+        &probe,
+        sizeof(probe),
+        nullptr,
+        0,
+        &bytesReturned,
+        nullptr
+    );
+    const DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(h);
+
+    return ok || err != ERROR_INVALID_FUNCTION;
+}
+
 static void AutoInstallAdjacentDriversIfNeeded()
 {
     wchar_t modulePath[MAX_PATH]{};
@@ -207,14 +240,19 @@ static void AutoInstallAdjacentDriversIfNeeded()
         exeDir.resize(lastSlash);
     }
 
-    // 1. Check HvTouchHid.sys
-    if (!IsDeviceSymbolicLinkAvailable(HVTOUCH_WIN32_DEVICE_PATH)) {
+    // 1. Check HvTouchHid.sys (install if missing or upgrade if older build lacks Mouse Scroll IOCTL)
+    const bool touchPresent = IsDeviceSymbolicLinkAvailable(HVTOUCH_WIN32_DEVICE_PATH);
+    if (!touchPresent || !DoesHvTouchSupportMouseScroll()) {
         std::wstring touchInf = exeDir + L"\\HvTouchHid\\HvTouchHid.inf";
         std::wstring touchSys = exeDir + L"\\HvTouchHid\\HvTouchHid.sys";
         if (GetFileAttributesW(touchInf.c_str()) != INVALID_FILE_ATTRIBUTES &&
             GetFileAttributesW(touchSys.c_str()) != INVALID_FILE_ATTRIBUTES)
         {
-            std::printf("[HvGuestBridge] Auto-installing adjacent Multi-Touch WDK driver (%ls)...\n", touchInf.c_str());
+            std::printf(
+                "[HvGuestBridge] %s adjacent Multi-Touch + Hi-Res Scroll WDK driver (%ls)...\n",
+                touchPresent ? "Upgrading" : "Auto-installing",
+                touchInf.c_str()
+            );
             InstallRootEnumeratedDriver(L"Root\\HvTouchHid", touchInf.c_str());
         }
     }

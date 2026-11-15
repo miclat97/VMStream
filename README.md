@@ -77,17 +77,20 @@ VMStream/
 1. **Strict Console Session Only (`localhost:2179` + Clean `PCB` GUID):**
    - `RdpConsoleControl` configures `mstscax.dll` with `Server = "localhost"`, `RDPPort = 2179`, `AuthenticationServiceClass = "Microsoft Virtual Console Service"`, `DisableEnhancedMode = true`, and `DisplayConnectionBar = false`.
    - `ExtendedSettings["PCB"]` is formatted via `VmId.ToString("D")` (**strictly without curly braces `{}`**), preventing `vmms.exe` from rejecting the connection on port 2179 with `0x80070057`.
-2. **Intercepting `WM_POINTER` Before `mstscax.dll` Converts Touch to Mouse:**
-   - Upon `OnConnected`, `TouchWindowInterceptor` enumerates child HWNDs (`EnumChildWindows`) of the RDP ActiveX control, finds `IHWindowClass`, and installs a native subclass (`SetWindowSubclass`).
+2. **Intercepting `WM_POINTER` & Touchpad `WM_MOUSEHWHEEL` Before `mstscax.dll`:**
+   - Upon `OnConnected`, `TouchWindowInterceptor` enumerates child HWNDs (`EnumChildWindows`) of the RDP ActiveX control, finds `IHWindowClass` and sibling windows, and installs a native subclass (`SetWindowSubclass`).
    - `WM_POINTERDOWN`, `WM_POINTERUPDATE`, and `WM_POINTERUP` for `PT_TOUCH` are normalized to `[0..32767]`, packed into a 64-byte `HV_TOUCH_INPUT_REPORT` (with `Confidence = 1` and `ScanTime` in $100\ \mu\text{s}$ units), sent over `AF_HYPERV`, and swallowed (`return 0`) so `mstscax.dll` never synthesizes legacy mouse clicks.
-3. **Windows 11 Precision Multi-Touch Descriptor (`HvTouchDescriptor.h`) + `mshidkmdf.sys`:**
+   - `WM_MOUSEHWHEEL` (two-finger left/right touchpad horizontal scroll) is forwarded over `AF_HYPERV` (`HvPacketType_MouseScroll`) without grabbing the touchpad globally, keeping Host 3-finger shortcuts (`Win+Tab`) and 4-finger virtual desktop swipes active at all times.
+3. **Windows 11 Precision Multi-Touch & Hi-Res Scroll HID Descriptor (`HvTouchDescriptor.h`) + `mshidkmdf.sys`:**
    - `HvTouchHid.inf` registers the in-box `%12%\mshidkmdf.sys` as the function driver and `HvTouchHid.sys` as a `LowerFilters` driver using Microsoft's Virtual HID Framework (`vhf.h`).
-   - Implements `EvtVhfAsyncOperationGetFeature` for Report ID `0x02` (`Contact Count Maximum = 10`) and Report ID `0x03` (256-byte THQA Certification Blob `0xFC, 0x28, 0xFE, 0x84, ...`).
+   - Implements `EvtVhfAsyncOperationGetFeature` and `EvtVhfAsyncOperationSetFeature` for Report ID `0x02` (`Contact Count Maximum = 10`), Report ID `0x03` (256-byte THQA Certification Blob), and Report ID `0x05` (Wheel / `AC Pan` `Resolution Multiplier` for smooth high-resolution horizontal scrolling via `mouhid.sys` across desktop, UAC, and Lock Screen).
    - Includes a sideband control device (`\\.\HvTouchHid`) and automatic **Stuck-Touch Reset** in `HvGuestBridge.exe` whenever the `AF_HYPERV` socket disconnects mid-gesture.
-4. **Non-Admin `AF_HYPERV` Binding & Multi-VM Isolation:**
+4. **Launcher Device Redirection Config & Live VM State Auto-Refresh:**
+   - `VmPickerForm` includes persistent toggles (`%LocalAppData%\VMStream\device_redirection.json`) for **Touchscreen**, **Touchpad H-Scroll**, **Speakers**, and **Microphone**, plus automatic non-blocking 2.5s WMI state polling (`Running` / `Off`).
+5. **Non-Admin `AF_HYPERV` Binding & Multi-VM Isolation:**
    - `Register-HvSocketServices.ps1` writes `Sddl = "D:(A;;GA;;;AU)(A;;GA;;;SY)(A;;GA;;;BA)"` under `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Virtualization\GuestCommunicationServices\<GUID>`, preventing `WSAEACCES (10013)` when `HvConsole.Host.exe` runs without UAC elevation.
    - `HvSocketTransport` binds `SOCKADDR_HV.VmId` to the **exact target VM GUID** (never `HV_GUID_WILDCARD`), allowing multiple VMs to run concurrently in separate windows with isolated audio and touch channels.
-5. **Privacy-Locked Microphone + Hardware `KSSTATE_RUN` Gating & Clock Drift Compensation:**
+6. **Privacy-Locked Microphone + Hardware `KSSTATE_RUN` Gating & Clock Drift Compensation:**
    - Host microphone state defaults to **OFF (LOCKED)** on startup and on every VM connection.
    - When OFF (or when no Guest application has opened `"Hyper-V Console Microphone"` in `KSSTATE_RUN`), `HostAudioEngine` completely releases `IAudioCaptureClient`, `IAudioClient`, and `IMMDevice` via `Marshal.FinalReleaseComObject`, keeping the Windows 11 system tray microphone icon extinguished.
    - `AdaptiveJitterBuffer` targets a **25 ms** playback buffer, dropping 1 stereo frame per 250 frames above **35 ms** and interpolating 1 stereo frame per 250 frames below **15 ms** to eliminate crystal oscillator clock drift (~50–100 ppm).
@@ -150,7 +153,7 @@ You can run `HvConsole.Host.exe` as a standard user (no UAC elevation required o
 # Launch interactive dark-mode VM Picker
 .\build\dist\Host\HvConsole.Host.exe
 
-# Connect directly to a VM by Name in Borderless Fullscreen
+# Connect directly to a VM by Name in Borderless Fullscreen (with optional device overrides: --no-touch, --no-hscroll, --no-speakers, --no-mic)
 .\build\dist\Host\HvConsole.Host.exe --vm "Win11-Dev" --fullscreen
 
 # Connect directly to a VM by GUID

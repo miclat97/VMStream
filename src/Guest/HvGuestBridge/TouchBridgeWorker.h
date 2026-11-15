@@ -23,6 +23,7 @@ private:
     void CloseDriverHandle();
     bool EnsureUserModeTouchInjectionInitialized();
     void InjectFrameUserMode(const HV_TOUCH_INPUT_REPORT& report);
+    void InjectMouseScrollUserMode(const HV_MOUSE_SCROLL_PAYLOAD& payload);
     void ReleaseAllTouchContacts();
 
     std::string                    m_TcpFallbackHost;

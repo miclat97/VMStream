@@ -240,6 +240,30 @@ void TouchBridgeWorker::InjectFrameUserMode(const HV_TOUCH_INPUT_REPORT& report)
     }
 }
 
+void TouchBridgeWorker::InjectMouseScrollUserMode(const HV_MOUSE_SCROLL_PAYLOAD& payload)
+{
+    INPUT inputs[2]{};
+    UINT count = 0;
+
+    if (payload.HorizontalDelta != 0) {
+        inputs[count].type = INPUT_MOUSE;
+        inputs[count].mi.dwFlags = MOUSEEVENTF_HWHEEL;
+        inputs[count].mi.mouseData = static_cast<DWORD>(static_cast<int32_t>(payload.HorizontalDelta));
+        ++count;
+    }
+
+    if (payload.VerticalDelta != 0) {
+        inputs[count].type = INPUT_MOUSE;
+        inputs[count].mi.dwFlags = MOUSEEVENTF_WHEEL;
+        inputs[count].mi.mouseData = static_cast<DWORD>(static_cast<int32_t>(payload.VerticalDelta));
+        ++count;
+    }
+
+    if (count > 0) {
+        SendInput(count, inputs, sizeof(INPUT));
+    }
+}
+
 // ============================================================================
 // ReleaseAllTouchContacts - Anti-Stuck-Touch Protection
 // Immediately submits a zeroed 64-byte HV_TOUCH_INPUT_REPORT (ContactCount=0,
@@ -370,6 +394,38 @@ void TouchBridgeWorker::WorkerLoop()
                 } else {
                     // Fallback to Win32 InitializeTouchInjection + InjectTouchInput when HvTouchHid.sys is not yet installed
                     InjectFrameUserMode(report);
+                }
+            }
+            else if (packetType == HvPacketType_MouseScroll && hdr.PayloadLength == sizeof(HV_MOUSE_SCROLL_PAYLOAD)) {
+                HV_MOUSE_SCROLL_PAYLOAD scrollPayload{};
+                if (!m_Transport->RecvExact(&scrollPayload, sizeof(scrollPayload))) {
+                    break;
+                }
+
+                if (scrollPayload.HorizontalDelta != 0 || scrollPayload.VerticalDelta != 0) {
+                    bool injectedViaDriver = false;
+                    if (EnsureDriverHandleOpen()) {
+                        DWORD bytesReturned = 0;
+                        BOOL ok = DeviceIoControl(
+                            m_DriverHandle,
+                            IOCTL_HVTOUCH_SUBMIT_MOUSE_SCROLL,
+                            &scrollPayload,
+                            sizeof(scrollPayload),
+                            nullptr,
+                            0,
+                            &bytesReturned,
+                            nullptr
+                        );
+                        if (ok) {
+                            injectedViaDriver = true;
+                        } else if (GetLastError() == ERROR_INVALID_HANDLE) {
+                            CloseDriverHandle();
+                        }
+                    }
+
+                    if (!injectedViaDriver) {
+                        InjectMouseScrollUserMode(scrollPayload);
+                    }
                 }
             }
             else if (packetType == HvPacketType_TouchReset) {

@@ -75,6 +75,9 @@ HvTouchEvtDriverDeviceAdd(
     devCtx->Device = device;
     devCtx->LastScanTime = 0;
     devCtx->VhfStarted = FALSE;
+    devCtx->WheelResolutionMultipliers = 0;
+    devCtx->VerticalWheelRemainder = 0;
+    devCtx->HorizontalPanRemainder = 0;
 
     WDF_OBJECT_ATTRIBUTES lockAttributes;
     WDF_OBJECT_ATTRIBUTES_INIT(&lockAttributes);
@@ -94,10 +97,11 @@ HvTouchEvtDriverDeviceAdd(
     );
 
     vhfConfig.VendorID = 0x045E;    // Microsoft Corp.
-    vhfConfig.ProductID = 0x09AA;   // VMStream Virtual Precision Touch Digitizer
-    vhfConfig.VersionNumber = 0x0100;
+    vhfConfig.ProductID = 0x09AA;   // VMStream Virtual Precision Touch Digitizer + Hi-Res Scroll
+    vhfConfig.VersionNumber = 0x0101;
     vhfConfig.VhfClientContext = devCtx;
     vhfConfig.EvtVhfAsyncOperationGetFeature = EvtVhfAsyncOperationGetFeature;
+    vhfConfig.EvtVhfAsyncOperationSetFeature = EvtVhfAsyncOperationSetFeature;
 
     status = VhfCreate(&vhfConfig, &devCtx->VhfHandle);
     if (!NT_SUCCESS(status)) {
@@ -269,9 +273,10 @@ HvTouchEvtDeviceContextCleanup(
 }
 
 // ============================================================================
-// EvtVhfAsyncOperationGetFeature - Handles Report ID 0x02 & 0x03 Feature Queries
+// EvtVhfAsyncOperationGetFeature - Handles Report ID 0x02, 0x03 & 0x05 Queries
 // Without handling both 0x02 (Max Contacts = 10) and 0x03 (THQA Certification),
 // Windows 11 hidclass.sys / win32kbase.sys disables multi-touch digitizer mode.
+// Report ID 0x05 reports the active Resolution Multiplier bitmask for Wheel/Pan.
 // ============================================================================
 VOID
 EvtVhfAsyncOperationGetFeature(
@@ -281,9 +286,9 @@ EvtVhfAsyncOperationGetFeature(
     _In_     PHID_XFER_PACKET   HidTransferPacket
 )
 {
-    UNREFERENCED_PARAMETER(VhfClientContext);
     UNREFERENCED_PARAMETER(VhfOperationContext);
 
+    PHVTOUCH_DEVICE_CONTEXT devCtx = reinterpret_cast<PHVTOUCH_DEVICE_CONTEXT>(VhfClientContext);
     NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
 
     if (HidTransferPacket != NULL && HidTransferPacket->reportBuffer != NULL) {
@@ -305,6 +310,55 @@ EvtVhfAsyncOperationGetFeature(
             HidTransferPacket->reportBufferLen = sizeof(HV_TOUCH_CERT_FEATURE);
             status = STATUS_SUCCESS;
         }
+        else if (HidTransferPacket->reportId == HV_TOUCH_REPORT_ID_MOUSE_RES_MULT &&
+                 HidTransferPacket->reportBufferLen >= sizeof(HV_MOUSE_RES_MULT_FEATURE))
+        {
+            auto* resMult = reinterpret_cast<PHV_MOUSE_RES_MULT_FEATURE>(HidTransferPacket->reportBuffer);
+            resMult->ReportId = HV_TOUCH_REPORT_ID_MOUSE_RES_MULT;
+            if (devCtx != NULL) {
+                WdfSpinLockAcquire(devCtx->ReportLock);
+                resMult->Multipliers = devCtx->WheelResolutionMultipliers;
+                WdfSpinLockRelease(devCtx->ReportLock);
+            } else {
+                resMult->Multipliers = 0;
+            }
+            HidTransferPacket->reportBufferLen = sizeof(HV_MOUSE_RES_MULT_FEATURE);
+            status = STATUS_SUCCESS;
+        }
+    }
+
+    VhfAsyncOperationComplete(VhfOperationHandle, status);
+}
+
+// ============================================================================
+// EvtVhfAsyncOperationSetFeature - Receives mouhid.sys Resolution Multiplier
+// ============================================================================
+VOID
+EvtVhfAsyncOperationSetFeature(
+    _In_     PVOID              VhfClientContext,
+    _In_     VHFOPERATIONHANDLE VhfOperationHandle,
+    _In_opt_ PVOID              VhfOperationContext,
+    _In_     PHID_XFER_PACKET   HidTransferPacket
+)
+{
+    UNREFERENCED_PARAMETER(VhfOperationContext);
+
+    PHVTOUCH_DEVICE_CONTEXT devCtx = reinterpret_cast<PHVTOUCH_DEVICE_CONTEXT>(VhfClientContext);
+    NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
+
+    if (devCtx != NULL &&
+        HidTransferPacket != NULL &&
+        HidTransferPacket->reportBuffer != NULL &&
+        HidTransferPacket->reportId == HV_TOUCH_REPORT_ID_MOUSE_RES_MULT &&
+        HidTransferPacket->reportBufferLen >= sizeof(HV_MOUSE_RES_MULT_FEATURE))
+    {
+        const auto* resMult = reinterpret_cast<const HV_MOUSE_RES_MULT_FEATURE*>(HidTransferPacket->reportBuffer);
+        WdfSpinLockAcquire(devCtx->ReportLock);
+        devCtx->WheelResolutionMultipliers = static_cast<UCHAR>(resMult->Multipliers & 0x0Fu);
+        devCtx->VerticalWheelRemainder = 0;
+        devCtx->HorizontalPanRemainder = 0;
+        WdfSpinLockRelease(devCtx->ReportLock);
+        status = STATUS_SUCCESS;
     }
 
     VhfAsyncOperationComplete(VhfOperationHandle, status);
@@ -395,8 +449,86 @@ HvTouchResetAllContacts(
     return status;
 }
 
+static int16_t ClampToHidSigned16(LONG value)
+{
+    if (value > 32767L) return 32767;
+    if (value < -32767L) return -32767;
+    return static_cast<int16_t>(value);
+}
+
 // ============================================================================
-// HvTouchEvtIoDeviceControl - Dispatches IOCTL_HVTOUCH_SUBMIT_FRAME / RESET
+// HvTouchSubmitMouseScroll - Submits HID Mouse Report 0x04 (Wheel / AC Pan)
+// Respects the Windows mouhid.sys Resolution Multiplier (Feature Report 0x05):
+//   - If hi-res bit for the axis is active, raw 120-units/detent deltas pass 1:1.
+//   - Otherwise, deltas accumulate into standard whole-notch steps (Delta / 120).
+// A zeroed payload acts as a safe IOCTL capability probe and returns STATUS_SUCCESS.
+// ============================================================================
+NTSTATUS
+HvTouchSubmitMouseScroll(
+    _In_ PHVTOUCH_DEVICE_CONTEXT DeviceContext,
+    _In_reads_bytes_(sizeof(HV_MOUSE_SCROLL_PAYLOAD)) const HV_MOUSE_SCROLL_PAYLOAD* Payload
+)
+{
+    if (DeviceContext == NULL || !DeviceContext->VhfStarted || DeviceContext->VhfHandle == WDF_NO_HANDLE) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    if (Payload == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (Payload->HorizontalDelta == 0 && Payload->VerticalDelta == 0) {
+        return STATUS_SUCCESS;
+    }
+
+    HV_MOUSE_INPUT_REPORT report;
+    RtlZeroMemory(&report, sizeof(report));
+    report.ReportId = HV_TOUCH_REPORT_ID_MOUSE;
+
+    WdfSpinLockAcquire(DeviceContext->ReportLock);
+
+    const UCHAR mult = DeviceContext->WheelResolutionMultipliers;
+    const BOOLEAN vHiRes = ((mult & 0x03u) != 0);
+    const BOOLEAN hHiRes = (((mult >> 2) & 0x03u) != 0);
+
+    if (Payload->VerticalDelta != 0) {
+        if (vHiRes) {
+            report.Wheel = ClampToHidSigned16(Payload->VerticalDelta);
+        } else {
+            DeviceContext->VerticalWheelRemainder += Payload->VerticalDelta;
+            LONG notches = DeviceContext->VerticalWheelRemainder / 120L;
+            DeviceContext->VerticalWheelRemainder %= 120L;
+            report.Wheel = ClampToHidSigned16(notches);
+        }
+    }
+
+    if (Payload->HorizontalDelta != 0) {
+        if (hHiRes) {
+            report.Pan = ClampToHidSigned16(Payload->HorizontalDelta);
+        } else {
+            DeviceContext->HorizontalPanRemainder += Payload->HorizontalDelta;
+            LONG notches = DeviceContext->HorizontalPanRemainder / 120L;
+            DeviceContext->HorizontalPanRemainder %= 120L;
+            report.Pan = ClampToHidSigned16(notches);
+        }
+    }
+
+    NTSTATUS status = STATUS_SUCCESS;
+    if (report.Wheel != 0 || report.Pan != 0) {
+        HID_XFER_PACKET transferPacket;
+        transferPacket.reportBuffer = reinterpret_cast<PUCHAR>(&report);
+        transferPacket.reportBufferLen = sizeof(HV_MOUSE_INPUT_REPORT);
+        transferPacket.reportId = HV_TOUCH_REPORT_ID_MOUSE;
+
+        status = VhfReadReportSubmit(DeviceContext->VhfHandle, &transferPacket);
+    }
+
+    WdfSpinLockRelease(DeviceContext->ReportLock);
+    return status;
+}
+
+// ============================================================================
+// HvTouchEvtIoDeviceControl - Dispatches IOCTL_HVTOUCH_SUBMIT_FRAME / RESET / SCROLL
 // ============================================================================
 VOID
 HvTouchEvtIoDeviceControl(
@@ -453,6 +585,30 @@ HvTouchEvtIoDeviceControl(
     case IOCTL_HVTOUCH_RESET_CONTACTS:
     {
         status = HvTouchResetAllContacts(devCtx);
+        break;
+    }
+
+    case IOCTL_HVTOUCH_SUBMIT_MOUSE_SCROLL:
+    {
+        if (InputBufferLength < sizeof(HV_MOUSE_SCROLL_PAYLOAD)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PVOID inputBuffer = NULL;
+        size_t bufferLen = 0;
+        status = WdfRequestRetrieveInputBuffer(
+            Request,
+            sizeof(HV_MOUSE_SCROLL_PAYLOAD),
+            &inputBuffer,
+            &bufferLen
+        );
+        if (NT_SUCCESS(status)) {
+            status = HvTouchSubmitMouseScroll(
+                devCtx,
+                reinterpret_cast<const HV_MOUSE_SCROLL_PAYLOAD*>(inputBuffer)
+            );
+        }
         break;
     }
 

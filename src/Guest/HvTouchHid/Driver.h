@@ -20,6 +20,9 @@ typedef struct _HVTOUCH_DEVICE_CONTEXT {
     WDFSPINLOCK     ReportLock;
     USHORT          LastScanTime;
     BOOLEAN         VhfStarted;
+    UCHAR           WheelResolutionMultipliers;
+    LONG            VerticalWheelRemainder;
+    LONG            HorizontalPanRemainder;
 } HVTOUCH_DEVICE_CONTEXT, *PHVTOUCH_DEVICE_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(HVTOUCH_DEVICE_CONTEXT, HvTouchGetDeviceContext)
@@ -40,6 +43,7 @@ EVT_WDF_OBJECT_CONTEXT_CLEANUP      HvTouchEvtDeviceContextCleanup;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL  HvTouchEvtIoDeviceControl;
 
 EVT_VHF_ASYNC_OPERATION             EvtVhfAsyncOperationGetFeature;
+EVT_VHF_ASYNC_OPERATION             EvtVhfAsyncOperationSetFeature;
 
 NTSTATUS
 HvTouchCreateControlDevice(
@@ -61,6 +65,12 @@ HvTouchSubmitInputReport(
 NTSTATUS
 HvTouchResetAllContacts(
     _In_ PHVTOUCH_DEVICE_CONTEXT DeviceContext
+);
+
+NTSTATUS
+HvTouchSubmitMouseScroll(
+    _In_ PHVTOUCH_DEVICE_CONTEXT DeviceContext,
+    _In_reads_bytes_(sizeof(HV_MOUSE_SCROLL_PAYLOAD)) const HV_MOUSE_SCROLL_PAYLOAD* Payload
 );
 
 EXTERN_C_END

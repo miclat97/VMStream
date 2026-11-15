@@ -6,11 +6,11 @@
 // ============================================================================
 using System;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.Windows.Forms;
 using HvConsole.Host.Audio;
 using HvConsole.Host.Input;
+using HvConsole.Host.Protocol;
 using HvConsole.Host.Transport;
 using HvConsole.Host.Wmi;
 
@@ -23,6 +23,7 @@ public sealed class QuickSettingsHudForm : Form
     private readonly IHvTransport _touchTransport;
     private readonly HostAudioEngine _audioEngine;
     private readonly TouchWindowInterceptor _touchInterceptor;
+    private readonly DeviceRedirectionSettings _deviceSettings;
 
     private readonly Label _lblVmHeader;
     private readonly Label _lblTransportStatus;
@@ -35,27 +36,32 @@ public sealed class QuickSettingsHudForm : Form
     private readonly Button _btnMicToggle;
     private readonly Label _lblMicSubstatus;
     private readonly CheckBox _chkGateKsState;
+    private readonly CheckBox _chkTouchscreenRedir;
+    private readonly CheckBox _chkTouchpadHScrollRedir;
     private readonly Button _btnToggleFullscreen;
     private readonly Button _btnDisconnect;
     private readonly System.Windows.Forms.Timer _refreshTimer;
-    private bool _suppressRateEvents;
+    private bool _suppressEvents;
 
     public event Action? RequestToggleFullscreen;
     public event Action? RequestDisconnect;
     public event Action? RequestToggleMicrophone;
+    public event Action? RequestTouchConfigurationRefresh;
 
     public QuickSettingsHudForm(
         HyperVVmInfo vmInfo,
         IHvTransport audioTransport,
         IHvTransport touchTransport,
         HostAudioEngine audioEngine,
-        TouchWindowInterceptor touchInterceptor)
+        TouchWindowInterceptor touchInterceptor,
+        DeviceRedirectionSettings? deviceSettings = null)
     {
         _vmInfo = vmInfo;
         _audioTransport = audioTransport;
         _touchTransport = touchTransport;
         _audioEngine = audioEngine;
         _touchInterceptor = touchInterceptor;
+        _deviceSettings = deviceSettings ?? new DeviceRedirectionSettings();
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -65,13 +71,13 @@ public sealed class QuickSettingsHudForm : Form
         DoubleBuffered = true;
         BackColor = Color.FromArgb(15, 23, 42);
         ForeColor = Color.FromArgb(241, 245, 249);
-        Size = new Size(460, 468);
+        Size = new Size(460, 534);
         Opacity = 0.97;
 
         var headerFont = new Font("Segoe UI Semibold", 12f, FontStyle.Bold);
         var sectionFont = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold);
         var bodyFont = new Font("Segoe UI", 9.0f, FontStyle.Regular);
-        var monoFont = new Font("Consolas", 8.75f, FontStyle.Regular);
+        var monoFont = new Font("Consolas", 8.5f, FontStyle.Regular);
 
         _lblVmHeader = new Label
         {
@@ -118,7 +124,7 @@ public sealed class QuickSettingsHudForm : Form
             Text = "SPEAKER PLAYBACK (WaveRT -> Host WASAPI)",
             Font = sectionFont,
             ForeColor = Color.FromArgb(203, 213, 225),
-            Location = new Point(20, 126),
+            Location = new Point(20, 124),
             Size = new Size(420, 20)
         };
 
@@ -129,8 +135,9 @@ public sealed class QuickSettingsHudForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
             ForeColor = Color.White,
-            Location = new Point(20, 152),
-            Size = new Size(115, 34)
+            Location = new Point(20, 150),
+            Size = new Size(115, 34),
+            Enabled = _deviceSettings.EnableSpeakers
         };
         _btnSpeakerMute.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
         _btnSpeakerMute.Click += (_, _) =>
@@ -141,11 +148,11 @@ public sealed class QuickSettingsHudForm : Form
 
         _lblVolumeValue = new Label
         {
-            Text = "100%",
+            Text = _deviceSettings.EnableSpeakers ? "100%" : "OFF",
             Font = sectionFont,
             ForeColor = Color.FromArgb(241, 245, 249),
             TextAlign = ContentAlignment.MiddleRight,
-            Location = new Point(385, 156),
+            Location = new Point(385, 154),
             Size = new Size(55, 24)
         };
 
@@ -155,9 +162,10 @@ public sealed class QuickSettingsHudForm : Form
             Maximum = 100,
             TickFrequency = 10,
             Value = (int)Math.Round(_audioEngine.SpeakerVolume * 100),
-            Location = new Point(145, 150),
+            Location = new Point(145, 148),
             Size = new Size(235, 40),
-            BackColor = Color.FromArgb(15, 23, 42)
+            BackColor = Color.FromArgb(15, 23, 42),
+            Enabled = _deviceSettings.EnableSpeakers
         };
         _sliderVolume.ValueChanged += (_, _) =>
         {
@@ -170,7 +178,7 @@ public sealed class QuickSettingsHudForm : Form
             Text = "Sample Rate (WASAPI):",
             Font = bodyFont,
             ForeColor = Color.FromArgb(148, 163, 184),
-            Location = new Point(20, 199),
+            Location = new Point(20, 197),
             Size = new Size(165, 22)
         };
 
@@ -181,8 +189,9 @@ public sealed class QuickSettingsHudForm : Form
             Font = bodyFont,
             BackColor = Color.FromArgb(30, 41, 59),
             ForeColor = Color.FromArgb(241, 245, 249),
-            Location = new Point(195, 195),
-            Size = new Size(245, 26)
+            Location = new Point(195, 193),
+            Size = new Size(245, 26),
+            Enabled = _deviceSettings.AnyAudioChannelEnabled
         };
         _cmbSampleRate.Items.AddRange(new object[]
         {
@@ -192,7 +201,7 @@ public sealed class QuickSettingsHudForm : Form
         });
         _cmbSampleRate.SelectedIndexChanged += (_, _) =>
         {
-            if (_suppressRateEvents) return;
+            if (_suppressEvents) return;
             AudioSampleRatePreference selected = _cmbSampleRate.SelectedIndex switch
             {
                 1 => AudioSampleRatePreference.Hz44100,
@@ -209,7 +218,7 @@ public sealed class QuickSettingsHudForm : Form
             Text = "HOST MICROPHONE PRIVACY LOCK (Ctrl+Alt+Shift+M)",
             Font = sectionFont,
             ForeColor = Color.FromArgb(203, 213, 225),
-            Location = new Point(20, 242),
+            Location = new Point(20, 238),
             Size = new Size(420, 20)
         };
 
@@ -217,8 +226,9 @@ public sealed class QuickSettingsHudForm : Form
         {
             Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
             FlatStyle = FlatStyle.Flat,
-            Location = new Point(20, 268),
-            Size = new Size(420, 44)
+            Location = new Point(20, 264),
+            Size = new Size(420, 44),
+            Enabled = _deviceSettings.EnableMicrophone
         };
         _btnMicToggle.Click += (_, _) => RequestToggleMicrophone?.Invoke();
 
@@ -226,7 +236,7 @@ public sealed class QuickSettingsHudForm : Form
         {
             Font = bodyFont,
             ForeColor = Color.FromArgb(148, 163, 184),
-            Location = new Point(20, 318),
+            Location = new Point(20, 314),
             Size = new Size(420, 22)
         };
 
@@ -236,12 +246,62 @@ public sealed class QuickSettingsHudForm : Form
             Font = new Font("Segoe UI", 8.5f),
             ForeColor = Color.FromArgb(203, 213, 225),
             Checked = _audioEngine.GateMicOnGuestKsState,
-            Location = new Point(22, 344),
-            Size = new Size(420, 24)
+            Location = new Point(22, 340),
+            Size = new Size(420, 24),
+            Enabled = _deviceSettings.EnableMicrophone
         };
         _chkGateKsState.CheckedChanged += (_, _) =>
         {
             _audioEngine.GateMicOnGuestKsState = _chkGateKsState.Checked;
+            UpdateUiState();
+        };
+
+        // --- Input Redirection Section (Touch & Touchpad H-Scroll) ---
+        var lblInputTitle = new Label
+        {
+            Text = "INPUT REDIRECTION (HvTouchHid AF_HYPERV)",
+            Font = sectionFont,
+            ForeColor = Color.FromArgb(203, 213, 225),
+            Location = new Point(20, 376),
+            Size = new Size(420, 20)
+        };
+
+        bool touchTransportActive = _deviceSettings.AnyTouchChannelEnabled;
+        _chkTouchscreenRedir = new CheckBox
+        {
+            Text = "Touchscreen Digitizer",
+            Font = bodyFont,
+            ForeColor = Color.FromArgb(203, 213, 225),
+            Checked = _touchInterceptor.TouchRedirectionEnabled,
+            Location = new Point(22, 402),
+            Size = new Size(195, 24),
+            Enabled = touchTransportActive
+        };
+        _chkTouchscreenRedir.CheckedChanged += (_, _) =>
+        {
+            if (_suppressEvents) return;
+            _touchInterceptor.SetTouchRedirectionEnabled(_chkTouchscreenRedir.Checked);
+            if (_chkTouchscreenRedir.Checked)
+            {
+                RequestTouchConfigurationRefresh?.Invoke();
+            }
+            UpdateUiState();
+        };
+
+        _chkTouchpadHScrollRedir = new CheckBox
+        {
+            Text = "Touchpad H-Scroll (Left/Right)",
+            Font = bodyFont,
+            ForeColor = Color.FromArgb(203, 213, 225),
+            Checked = _touchInterceptor.TouchpadHorizontalScrollEnabled,
+            Location = new Point(222, 402),
+            Size = new Size(218, 24),
+            Enabled = touchTransportActive
+        };
+        _chkTouchpadHScrollRedir.CheckedChanged += (_, _) =>
+        {
+            if (_suppressEvents) return;
+            _touchInterceptor.TouchpadHorizontalScrollEnabled = _chkTouchpadHScrollRedir.Checked;
             UpdateUiState();
         };
 
@@ -253,7 +313,7 @@ public sealed class QuickSettingsHudForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
             ForeColor = Color.FromArgb(241, 245, 249),
-            Location = new Point(20, 386),
+            Location = new Point(20, 444),
             Size = new Size(280, 38)
         };
         _btnToggleFullscreen.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
@@ -270,7 +330,7 @@ public sealed class QuickSettingsHudForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(127, 29, 29),
             ForeColor = Color.White,
-            Location = new Point(312, 386),
+            Location = new Point(312, 444),
             Size = new Size(128, 38)
         };
         _btnDisconnect.FlatAppearance.BorderColor = Color.FromArgb(185, 28, 28);
@@ -282,7 +342,7 @@ public sealed class QuickSettingsHudForm : Form
             Font = new Font("Segoe UI", 8.0f),
             ForeColor = Color.FromArgb(100, 116, 139),
             TextAlign = ContentAlignment.MiddleCenter,
-            Location = new Point(20, 436),
+            Location = new Point(20, 496),
             Size = new Size(420, 18)
         };
 
@@ -302,6 +362,9 @@ public sealed class QuickSettingsHudForm : Form
             _btnMicToggle,
             _lblMicSubstatus,
             _chkGateKsState,
+            lblInputTitle,
+            _chkTouchscreenRedir,
+            _chkTouchpadHScrollRedir,
             _btnToggleFullscreen,
             _btnDisconnect,
             lblFooterHint
@@ -361,34 +424,59 @@ public sealed class QuickSettingsHudForm : Form
         string audioProto = _audioTransport.IsUsingTcpFallback ? "TCP-Fallback" : "AF_HYPERV";
         string touchProto = _touchTransport.IsUsingTcpFallback ? "TCP-Fallback" : "AF_HYPERV";
 
-        string audioStatus = _audioTransport.IsConnected
-            ? $"Connected ({audioProto}, RTT {_audioTransport.LastRttMilliseconds:F2} ms)"
-            : $"Waiting for Guest ({audioProto})...";
+        string audioStatus = !_deviceSettings.AnyAudioChannelEnabled
+            ? "Disabled in Launcher Settings"
+            : (_audioTransport.IsConnected
+                ? $"Connected ({audioProto}, RTT {_audioTransport.LastRttMilliseconds:F2} ms)"
+                : $"Waiting for Guest ({audioProto})...");
 
-        string touchStatus = _touchTransport.IsConnected
-            ? $"Connected ({touchProto}, Active Fingers: {_touchInterceptor.ActiveTouchPoints}/10)"
-            : $"Waiting for Guest ({touchProto})...";
+        string touchStatus = !_deviceSettings.AnyTouchChannelEnabled
+            ? "Disabled in Launcher Settings"
+            : (_touchTransport.IsConnected
+                ? $"Connected ({touchProto}, Touch:{_touchInterceptor.ActiveTouchPoints}/10, H-Scroll:{_touchInterceptor.ForwardedHorizontalScrollCount})"
+                : $"Waiting for Guest ({touchProto})...");
 
         _lblTransportStatus.Text =
             $"Audio Socket : {audioStatus}\n" +
-            $"Touch Socket : {touchStatus}";
+            $"Input Socket : {touchStatus}";
 
-        double guestRateKhz = _audioEngine.ActiveGuestRenderSampleRate / 1000.0;
-        double hostRateKhz = _audioEngine.ActiveRenderSampleRate / 1000.0;
-        string fmtTag = _audioEngine.RenderUsesFloat32 ? "Float32" : "PCM16";
-        string drvTag = _audioEngine.RenderUsesEventCallback ? "Event" : "Poll";
-        _lblSpeakerTitle.Text = string.Format(
-            CultureInfo.InvariantCulture,
-            "SPEAKER ({0:0.#} kHz -> {1:0.#} kHz {2}/{3})",
-            guestRateKhz,
-            hostRateKhz,
-            fmtTag,
-            drvTag
-        );
+        if (!_deviceSettings.EnableSpeakers)
+        {
+            _lblSpeakerTitle.Text = "SPEAKER PLAYBACK (Disabled in Launcher)";
+            _lblBufferStats.Text = "Speaker redirection is disabled for this session.";
+            _btnSpeakerMute.Text = "Disabled";
+            _btnSpeakerMute.BackColor = Color.FromArgb(30, 41, 59);
+        }
+        else
+        {
+            double guestRateKhz = _audioEngine.ActiveGuestRenderSampleRate / 1000.0;
+            double hostRateKhz = _audioEngine.ActiveRenderSampleRate / 1000.0;
+            string fmtTag = _audioEngine.RenderUsesFloat32 ? "Float32" : "PCM16";
+            string drvTag = _audioEngine.RenderUsesEventCallback ? "Event" : "Poll";
+            _lblSpeakerTitle.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "SPEAKER ({0:0.#} kHz -> {1:0.#} kHz {2}/{3})",
+                guestRateKhz,
+                hostRateKhz,
+                fmtTag,
+                drvTag
+            );
 
-        var jb = _audioEngine.JitterBuffer;
-        _lblBufferStats.Text =
-            $"Buffer: {jb.BufferedMilliseconds:F1}ms (T:22ms) | Drift:-{jb.TotalDroppedFramesForDrift}/+{jb.TotalDuplicatedFramesForDrift} | XRun:{jb.TotalUnderruns}";
+            var jb = _audioEngine.JitterBuffer;
+            _lblBufferStats.Text =
+                $"Buffer: {jb.BufferedMilliseconds:F1}ms (T:22ms) | Drift:-{jb.TotalDroppedFramesForDrift}/+{jb.TotalDuplicatedFramesForDrift} | XRun:{jb.TotalUnderruns}";
+
+            if (_audioEngine.SpeakerMuted)
+            {
+                _btnSpeakerMute.Text = "\U0001F507 Muted";
+                _btnSpeakerMute.BackColor = Color.FromArgb(127, 29, 29);
+            }
+            else
+            {
+                _btnSpeakerMute.Text = "\U0001F50A Unmuted";
+                _btnSpeakerMute.BackColor = Color.FromArgb(30, 41, 59);
+            }
+        }
 
         if (!_cmbSampleRate.DroppedDown)
         {
@@ -400,25 +488,39 @@ public sealed class QuickSettingsHudForm : Form
             };
             if (_cmbSampleRate.SelectedIndex != desiredIndex)
             {
-                _suppressRateEvents = true;
+                _suppressEvents = true;
                 try { _cmbSampleRate.SelectedIndex = desiredIndex; }
-                finally { _suppressRateEvents = false; }
+                finally { _suppressEvents = false; }
             }
         }
 
-        if (_audioEngine.SpeakerMuted)
+        _suppressEvents = true;
+        try
         {
-            _btnSpeakerMute.Text = "\U0001F507 Muted";
-            _btnSpeakerMute.BackColor = Color.FromArgb(127, 29, 29);
+            if (_chkTouchscreenRedir.Checked != _touchInterceptor.TouchRedirectionEnabled)
+            {
+                _chkTouchscreenRedir.Checked = _touchInterceptor.TouchRedirectionEnabled;
+            }
+            if (_chkTouchpadHScrollRedir.Checked != _touchInterceptor.TouchpadHorizontalScrollEnabled)
+            {
+                _chkTouchpadHScrollRedir.Checked = _touchInterceptor.TouchpadHorizontalScrollEnabled;
+            }
         }
-        else
+        finally
         {
-            _btnSpeakerMute.Text = "\U0001F50A Unmuted";
-            _btnSpeakerMute.BackColor = Color.FromArgb(30, 41, 59);
+            _suppressEvents = false;
         }
 
         // Microphone Privacy Button State
-        if (!_audioEngine.IsMicUserEnabled)
+        if (!_deviceSettings.EnableMicrophone)
+        {
+            _btnMicToggle.Text = "\U0001F512  MICROPHONE DISABLED IN LAUNCHER SETTINGS";
+            _btnMicToggle.BackColor = Color.FromArgb(30, 41, 59);
+            _btnMicToggle.ForeColor = Color.FromArgb(148, 163, 184);
+            _btnMicToggle.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
+            _lblMicSubstatus.Text = "Enable Microphone in VM Launcher settings to allow Ctrl+Alt+Shift+M.";
+        }
+        else if (!_audioEngine.IsMicUserEnabled)
         {
             _btnMicToggle.Text = "\U0001F512  MICROPHONE OFF - PRIVACY LOCKED (Click to Enable)";
             _btnMicToggle.BackColor = Color.FromArgb(20, 83, 45);

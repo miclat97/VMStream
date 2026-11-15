@@ -40,6 +40,8 @@ public static class HvProtocolConstants
     public const int MaxTouchContacts = 10;
     public const ushort TouchCoordinateMax = 32767;
     public const byte TouchReportIdInput = 0x01;
+    public const byte TouchReportIdMouse = 0x04;
+    public const byte TouchReportIdMouseResMult = 0x05;
 
     public static int GetPeriodFramesForRate(int sampleRate) =>
         sampleRate == AudioSampleRate44100 ? AudioFramesPerPeriod44100 : AudioFramesPerPeriod;
@@ -85,7 +87,8 @@ public enum HvPacketType : byte
     AudioCapturePcm = 0x11, // Host -> Guest: Microphone PCM audio frame
     AudioControl    = 0x12, // Bidirectional: Guest KSSTATE_RUN / Host Mic Gate / Sample Rate
     TouchFrame      = 0x20, // Host -> Guest: 64-byte HID Multi-Touch Input Report
-    TouchReset      = 0x21  // Host -> Guest: Release all contacts immediately
+    TouchReset      = 0x21, // Host -> Guest: Release all contacts immediately
+    MouseScroll     = 0x22  // Host -> Guest: Touchpad / Mouse horizontal scroll delta
 }
 
 [Flags]
@@ -231,4 +234,19 @@ public unsafe struct HvTouchInputReport
             return *slotPtr;
         }
     }
+}
+
+/// <summary>
+/// 8-byte mouse/touchpad scroll payload matching HV_MOUSE_SCROLL_PAYLOAD.
+/// Win32 WM_MOUSEHWHEEL convention: positive HorizontalDelta = right, negative = left (120 = 1 detent).
+/// </summary>
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public struct HvMouseScrollPayload
+{
+    public short HorizontalDelta;
+    public short VerticalDelta;
+    public ushort KeyState;
+    public ushort Flags;
+
+    public const int Size = 8;
 }

@@ -56,6 +56,7 @@ public sealed class TouchWindowInterceptor : IDisposable
     private const uint WM_POINTERLEAVE          = 0x024A;
     private const uint WM_POINTERACTIVATE       = 0x024B;
     private const uint WM_POINTERCAPTURECHANGED = 0x024C;
+    private const uint WM_MOUSEHWHEEL           = 0x020E;
     private const uint WM_MOUSEHOVER            = 0x02A1;
     private const uint WM_MOUSELEAVE            = 0x02A3;
 
@@ -310,6 +311,7 @@ public sealed class TouchWindowInterceptor : IDisposable
     private readonly long _qpcOrigin;
 
     private readonly HashSet<IntPtr> _subclassedHwnds = new();
+    private readonly HashSet<IntPtr> _touchConfiguredHwnds = new();
     private readonly Dictionary<uint, IntPtr> _threadHooks = new();
     private readonly Dictionary<uint, List<PendingWindowOp>> _pendingOpsByThread = new();
     private readonly object _stateLock = new();
@@ -321,9 +323,25 @@ public sealed class TouchWindowInterceptor : IDisposable
     private int _pendingOpCount;
     private int _activeTouchCount;
     private long _lastTouchTickMs;
+    private long _forwardedHorizontalScrollCount;
+    private volatile bool _touchRedirectionEnabled;
+    private volatile bool _touchpadHorizontalScrollEnabled;
     private volatile bool _disposed;
 
     public int ActiveTouchPoints => Volatile.Read(ref _activeTouchCount);
+    public long ForwardedHorizontalScrollCount => Interlocked.Read(ref _forwardedHorizontalScrollCount);
+
+    public bool TouchRedirectionEnabled
+    {
+        get => _touchRedirectionEnabled;
+        set => SetTouchRedirectionEnabled(value);
+    }
+
+    public bool TouchpadHorizontalScrollEnabled
+    {
+        get => _touchpadHorizontalScrollEnabled;
+        set => _touchpadHorizontalScrollEnabled = value;
+    }
 
     public event Action? RdpFocusAcquired;
 
@@ -337,15 +355,30 @@ public sealed class TouchWindowInterceptor : IDisposable
         catch { }
     }
 
-    public TouchWindowInterceptor(IHvTransport touchTransport)
+    public TouchWindowInterceptor(
+        IHvTransport touchTransport,
+        bool enableTouchRedirection = true,
+        bool enableTouchpadHorizontalScroll = true)
     {
         _touchTransport = touchTransport;
+        _touchRedirectionEnabled = enableTouchRedirection;
+        _touchpadHorizontalScrollEnabled = enableTouchpadHorizontalScroll;
         _currentProcessId = GetCurrentProcessId();
         _qpcOrigin = Stopwatch.GetTimestamp();
 
         // Keep delegates rooted for the lifetime of the interceptor
         _subclassDelegate = SubclassWndProc;
         _callWndProcDelegate = CallWndProc;
+    }
+
+    public void SetTouchRedirectionEnabled(bool enabled)
+    {
+        bool previous = _touchRedirectionEnabled;
+        _touchRedirectionEnabled = enabled;
+        if (previous && !enabled)
+        {
+            SendTouchReset();
+        }
     }
 
     /// <summary>
@@ -381,10 +414,15 @@ public sealed class TouchWindowInterceptor : IDisposable
             {
                 _subclassedHwnds.RemoveWhere(h => !IsWindow(h));
             }
+            if (_touchConfiguredHwnds.Count > 0)
+            {
+                _touchConfiguredHwnds.RemoveWhere(h => !IsWindow(h));
+            }
         }
 
         uint currentTid = GetCurrentThreadId();
         int attachedOrScheduled = 0;
+        bool touchEnabled = _touchRedirectionEnabled;
 
         foreach (var (hwnd, className) in candidates)
         {
@@ -394,15 +432,21 @@ public sealed class TouchWindowInterceptor : IDisposable
             if (ownerTid == 0 || ownerPid != _currentProcessId) continue;
 
             bool alreadySubclassed;
+            bool touchConfigured;
             lock (_stateLock)
             {
                 alreadySubclassed = _subclassedHwnds.Contains(hwnd);
+                touchConfigured = _touchConfiguredHwnds.Contains(hwnd);
             }
 
             bool legacyTouchRegistered = false;
-            try { legacyTouchRegistered = IsTouchWindow(hwnd, out _); } catch { }
+            if (touchEnabled)
+            {
+                try { legacyTouchRegistered = IsTouchWindow(hwnd, out _); } catch { }
+            }
 
-            if (alreadySubclassed && !legacyTouchRegistered)
+            bool needsTouchConfig = touchEnabled && (!touchConfigured || legacyTouchRegistered);
+            if (alreadySubclassed && !needsTouchConfig)
             {
                 continue;
             }
@@ -510,13 +554,21 @@ public sealed class TouchWindowInterceptor : IDisposable
     {
         if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
 
-        // CRITICAL: mstscax.dll calls RegisterTouchWindow() on its internal child windows
-        // (such as IHWindowClass) on a background thread. UnregisterTouchWindow MUST succeed
-        // to switch Windows from legacy WM_TOUCH mouse emulation back to pure WM_POINTER*.
-        try { UnregisterTouchWindow(hwnd); } catch { }
+        if (_touchRedirectionEnabled)
+        {
+            // CRITICAL: mstscax.dll calls RegisterTouchWindow() on its internal child windows
+            // (such as IHWindowClass) on a background thread. UnregisterTouchWindow MUST succeed
+            // to switch Windows from legacy WM_TOUCH mouse emulation back to pure WM_POINTER*.
+            try { UnregisterTouchWindow(hwnd); } catch { }
 
-        DisableHostTouchVisualFeedback(hwnd);
-        DisableLegacyGestures(hwnd);
+            DisableHostTouchVisualFeedback(hwnd);
+            DisableLegacyGestures(hwnd);
+
+            lock (_stateLock)
+            {
+                _touchConfiguredHwnds.Add(hwnd);
+            }
+        }
 
         lock (_stateLock)
         {
@@ -546,6 +598,7 @@ public sealed class TouchWindowInterceptor : IDisposable
         lock (_stateLock)
         {
             _subclassedHwnds.Remove(hwnd);
+            _touchConfiguredHwnds.Remove(hwnd);
         }
     }
 
@@ -637,6 +690,7 @@ public sealed class TouchWindowInterceptor : IDisposable
                 lock (_stateLock)
                 {
                     _subclassedHwnds.Remove(hWnd);
+                    _touchConfiguredHwnds.Remove(hWnd);
                 }
                 return res;
             }
@@ -648,6 +702,30 @@ public sealed class TouchWindowInterceptor : IDisposable
                 return res;
             }
 
+            case WM_MOUSEHWHEEL:
+            {
+                if (_touchpadHorizontalScrollEnabled)
+                {
+                    long rawWParam = wParam.ToInt64();
+                    short hDelta = unchecked((short)((rawWParam >> 16) & 0xFFFF));
+                    ushort keyState = unchecked((ushort)(rawWParam & 0xFFFF));
+                    if (hDelta != 0)
+                    {
+                        var scrollPayload = new HvMouseScrollPayload
+                        {
+                            HorizontalDelta = hDelta,
+                            VerticalDelta = 0,
+                            KeyState = keyState,
+                            Flags = 0
+                        };
+                        _touchTransport.SendStruct(HvPacketType.MouseScroll, in scrollPayload);
+                        Interlocked.Increment(ref _forwardedHorizontalScrollCount);
+                    }
+                    return IntPtr.Zero;
+                }
+                break;
+            }
+
             case WM_POINTERDOWN:
             case WM_POINTERUPDATE:
             case WM_POINTERUP:
@@ -655,6 +733,8 @@ public sealed class TouchWindowInterceptor : IDisposable
             case WM_NCPOINTERUPDATE:
             case WM_NCPOINTERUP:
             {
+                if (!_touchRedirectionEnabled) break;
+
                 uint pointerId = (uint)(wParam.ToInt64() & 0xFFFF);
                 if (GetPointerType(pointerId, out uint pointerType) && pointerType == PT_TOUCH)
                 {
@@ -667,6 +747,8 @@ public sealed class TouchWindowInterceptor : IDisposable
 
             case WM_POINTERCAPTURECHANGED:
             {
+                if (!_touchRedirectionEnabled) break;
+
                 uint pointerId = (uint)(wParam.ToInt64() & 0xFFFF);
                 if (GetPointerType(pointerId, out uint pointerType) && pointerType == PT_TOUCH)
                 {
@@ -690,6 +772,8 @@ public sealed class TouchWindowInterceptor : IDisposable
             case WM_POINTERENTER:
             case WM_POINTERLEAVE:
             {
+                if (!_touchRedirectionEnabled) break;
+
                 uint pointerId = (uint)(wParam.ToInt64() & 0xFFFF);
                 if (GetPointerType(pointerId, out uint pointerType) && pointerType == PT_TOUCH)
                 {
@@ -701,6 +785,8 @@ public sealed class TouchWindowInterceptor : IDisposable
 
             case WM_POINTERACTIVATE:
             {
+                if (!_touchRedirectionEnabled) break;
+
                 uint pointerId = (uint)(wParam.ToInt64() & 0xFFFF);
                 if (GetPointerType(pointerId, out uint pointerType) && pointerType == PT_TOUCH)
                 {
@@ -712,6 +798,8 @@ public sealed class TouchWindowInterceptor : IDisposable
 
             case WM_TOUCH:
             {
+                if (!_touchRedirectionEnabled) break;
+
                 Interlocked.Exchange(ref _lastTouchTickMs, Environment.TickCount64);
                 if (lParam != IntPtr.Zero)
                 {
@@ -723,13 +811,15 @@ public sealed class TouchWindowInterceptor : IDisposable
 
             case WM_GESTURENOTIFY:
             {
+                if (!_touchRedirectionEnabled) break;
+
                 DisableLegacyGestures(hWnd);
                 return DefWindowProcW(hWnd, uMsg, wParam, lParam);
             }
 
             case WM_GESTURE:
             {
-                if (IsTouchPromotedMouseMessage())
+                if (_touchRedirectionEnabled && IsTouchPromotedMouseMessage())
                 {
                     return IntPtr.Zero;
                 }
@@ -756,7 +846,7 @@ public sealed class TouchWindowInterceptor : IDisposable
             {
                 // Swallow all touch-synthesized mouse and context-menu events so mstscax.dll never
                 // moves the mouse cursor or opens mouse context menus on touch hold / edge drag
-                if (IsTouchPromotedMouseMessage())
+                if (_touchRedirectionEnabled && IsTouchPromotedMouseMessage())
                 {
                     return IntPtr.Zero;
                 }
@@ -765,7 +855,7 @@ public sealed class TouchWindowInterceptor : IDisposable
 
             case WM_SETCURSOR:
             {
-                if (IsTouchPromotedMouseMessage())
+                if (_touchRedirectionEnabled && IsTouchPromotedMouseMessage())
                 {
                     return new IntPtr(1);
                 }
@@ -1079,7 +1169,11 @@ public sealed class TouchWindowInterceptor : IDisposable
         {
             if (!IsWindow(hwnd))
             {
-                lock (_stateLock) { _subclassedHwnds.Remove(hwnd); }
+                lock (_stateLock)
+                {
+                    _subclassedHwnds.Remove(hwnd);
+                    _touchConfiguredHwnds.Remove(hwnd);
+                }
                 continue;
             }
 
@@ -1107,6 +1201,7 @@ public sealed class TouchWindowInterceptor : IDisposable
             _pendingOpsByThread.Clear();
             Interlocked.Exchange(ref _pendingOpCount, 0);
             _subclassedHwnds.Clear();
+            _touchConfiguredHwnds.Clear();
         }
 
         foreach (IntPtr hHook in hooksToRemove)

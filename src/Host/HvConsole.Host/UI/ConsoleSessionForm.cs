@@ -97,6 +97,7 @@ public sealed class ConsoleSessionForm : Form
     }
 
     private readonly HyperVVmInfo _vmInfo;
+    private readonly DeviceRedirectionSettings _deviceSettings;
     private readonly IHvTransport _audioTransport;
     private readonly IHvTransport _touchTransport;
     private readonly HostAudioEngine _audioEngine;
@@ -125,12 +126,15 @@ public sealed class ConsoleSessionForm : Form
         HyperVVmInfo vmInfo,
         bool startInFullscreen = false,
         bool forceTcpFallback = false,
-        AudioSampleRatePreference? sampleRatePreference = null)
+        AudioSampleRatePreference? sampleRatePreference = null,
+        DeviceRedirectionSettings? deviceSettings = null)
     {
         _vmInfo = vmInfo;
         _startInFullscreen = startInFullscreen;
+        _deviceSettings = (deviceSettings ?? DeviceRedirectionSettings.Load()).Clone();
 
-        Text = $"VMStream - {_vmInfo.Name} [Console Session | Mic: OFF (Locked)]";
+        string initialMicTag = _deviceSettings.EnableMicrophone ? "Mic: OFF (Locked)" : "Mic: Disabled";
+        Text = $"VMStream - {_vmInfo.Name} [Console Session | {initialMicTag}]";
         BackColor = Color.Black;
         ForeColor = Color.FromArgb(241, 245, 249);
         StartPosition = FormStartPosition.CenterScreen;
@@ -153,8 +157,17 @@ public sealed class ConsoleSessionForm : Form
             forceTcpFallback
         );
 
-        _audioEngine = new HostAudioEngine(_audioTransport, sampleRatePreference);
-        _touchInterceptor = new TouchWindowInterceptor(_touchTransport);
+        _audioEngine = new HostAudioEngine(
+            _audioTransport,
+            sampleRatePreference,
+            speakersEnabled: _deviceSettings.EnableSpeakers,
+            microphoneAllowed: _deviceSettings.EnableMicrophone
+        );
+        _touchInterceptor = new TouchWindowInterceptor(
+            _touchTransport,
+            enableTouchRedirection: _deviceSettings.EnableTouchscreen,
+            enableTouchpadHorizontalScroll: _deviceSettings.EnableTouchpadHorizontalScroll
+        );
         _keyboardHook = new LowLevelKeyboardHook();
 
         _toastForm = new ToastOverlayForm();
@@ -163,12 +176,21 @@ public sealed class ConsoleSessionForm : Form
             _audioTransport,
             _touchTransport,
             _audioEngine,
-            _touchInterceptor
+            _touchInterceptor,
+            _deviceSettings
         );
 
         _hudForm.RequestToggleFullscreen += () => BeginInvoke(ToggleBorderlessFullscreen);
         _hudForm.RequestDisconnect += () => BeginInvoke(Close);
         _hudForm.RequestToggleMicrophone += () => BeginInvoke(ToggleMicrophoneWithFeedback);
+        _hudForm.RequestTouchConfigurationRefresh += () => BeginInvoke(() =>
+        {
+            if (!IsDisposed && !_isClosing && _rdpControl.IsHandleCreated)
+            {
+                _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+                ScheduleKeyboardHookBringToFront();
+            }
+        });
         _hudForm.VisibleChanged += (_, _) =>
         {
             if (!_hudForm.Visible && !_isClosing && IsHandleCreated && _rdpControl.IsConnected)
@@ -311,9 +333,15 @@ public sealed class ConsoleSessionForm : Form
         try { timeBeginPeriod(1); } catch { }
 
         _keyboardHook.Install();
-        _audioTransport.Start();
-        _touchTransport.Start();
-        _audioEngine.Start();
+        if (_deviceSettings.AnyAudioChannelEnabled)
+        {
+            _audioTransport.Start();
+            _audioEngine.Start();
+        }
+        if (_deviceSettings.AnyTouchChannelEnabled)
+        {
+            _touchTransport.Start();
+        }
 
         if (_startInFullscreen)
         {
@@ -338,7 +366,11 @@ public sealed class ConsoleSessionForm : Form
             if (IsDisposed || _isClosing) return;
             try
             {
-                _rdpControl.ConnectToHyperVConsole(_vmInfo.VmId, _vmInfo.Name);
+                _rdpControl.ConnectToHyperVConsole(
+                    _vmInfo.VmId,
+                    _vmInfo.Name,
+                    disableTouchRemoting: _deviceSettings.EnableTouchscreen
+                );
                 _rdpControl.ApplyViewportLayout(_rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
                 _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
                 ScheduleKeyboardHookBringToFront();
@@ -707,6 +739,20 @@ public sealed class ConsoleSessionForm : Form
 
     public void ToggleMicrophoneWithFeedback()
     {
+        if (!_deviceSettings.EnableMicrophone)
+        {
+            _audioEngine.SetMicrophonePrivacy(false);
+            UpdateWindowTitleAndHud();
+            _toastForm.ShowToast(
+                this,
+                "[DISABLED] Host Microphone: Redirect Disabled",
+                "Enable Microphone in VM Launcher settings to forward Host mic",
+                Color.FromArgb(148, 163, 184),
+                2200
+            );
+            return;
+        }
+
         bool enabled = _audioEngine.ToggleMicrophonePrivacy();
         UpdateWindowTitleAndHud();
 
@@ -745,9 +791,11 @@ public sealed class ConsoleSessionForm : Form
 
     private void UpdateWindowTitleAndHud()
     {
-        string micTag = !_audioEngine.IsMicUserEnabled
-            ? "Mic: OFF (Locked)"
-            : (_audioEngine.IsMicHardwareOpen ? "Mic: LIVE" : "Mic: ARMED");
+        string micTag = !_deviceSettings.EnableMicrophone
+            ? "Mic: Disabled"
+            : (!_audioEngine.IsMicUserEnabled
+                ? "Mic: OFF (Locked)"
+                : (_audioEngine.IsMicHardwareOpen ? "Mic: LIVE" : "Mic: ARMED"));
 
         Text = $"VMStream - {_vmInfo.Name} [Console Session | {micTag}]";
 

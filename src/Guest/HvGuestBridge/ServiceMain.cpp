@@ -8,6 +8,7 @@
 
 #include <windows.h>
 #include <winsvc.h>
+#include <cfgmgr32.h>
 #include <setupapi.h>
 #include <newdev.h>
 #include <mmsystem.h>
@@ -16,6 +17,10 @@
 #include <cwchar>
 #include <string>
 #include <vector>
+
+#ifndef MAX_CLASS_NAME_LEN
+#define MAX_CLASS_NAME_LEN 32
+#endif
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ws2_32.lib")

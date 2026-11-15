@@ -135,6 +135,16 @@ public sealed class QuickSettingsHudForm : Form
             UpdateUiState();
         };
 
+        _lblVolumeValue = new Label
+        {
+            Text = "100%",
+            Font = sectionFont,
+            ForeColor = Color.FromArgb(241, 245, 249),
+            TextAlign = ContentAlignment.MiddleRight,
+            Location = new Point(385, 156),
+            Size = new Size(55, 24)
+        };
+
         _sliderVolume = new TrackBar
         {
             Minimum = 0,
@@ -149,16 +159,6 @@ public sealed class QuickSettingsHudForm : Form
         {
             _audioEngine.SpeakerVolume = _sliderVolume.Value / 100.0f;
             _lblVolumeValue.Text = $"{_sliderVolume.Value}%";
-        };
-
-        _lblVolumeValue = new Label
-        {
-            Text = "100%",
-            Font = sectionFont,
-            ForeColor = Color.FromArgb(241, 245, 249),
-            TextAlign = ContentAlignment.MiddleRight,
-            Location = new Point(385, 156),
-            Size = new Size(55, 24)
         };
 
         // --- Microphone Privacy Section ---

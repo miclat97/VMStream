@@ -3,7 +3,6 @@
 // Project: VMStream - Guest Virtual Audio Driver (HvVirtualAudio.sys)
 // ============================================================================
 #define PUT_GUIDS_HERE
-#define INITGUID
 #include "AudioCommon.h"
 #include "TopologyMiniport.h"
 #include "WaveRTMiniport.h"
@@ -496,7 +495,7 @@ InstallSubdevice(
     if (IsTopology) {
         status = CreateMiniportTopologyHvAudio(
             &miniport,
-            GUID_NULL,
+            HV_STREAM_GUID_ZERO,
             NULL,
             NonPagedPoolNx,
             AdapterCommon,
@@ -505,7 +504,7 @@ InstallSubdevice(
     } else {
         status = CreateMiniportWaveRTHvAudio(
             &miniport,
-            GUID_NULL,
+            HV_STREAM_GUID_ZERO,
             NULL,
             NonPagedPoolNx,
             AdapterCommon,

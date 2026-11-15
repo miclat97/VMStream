@@ -5,14 +5,14 @@
 // ============================================================================
 #include "TopologyMiniport.h"
 
-// Custom Component/Name GUIDs for Endpoint Friendly Names inHvVirtualAudio.inf
+// Custom Component/Name GUIDs for Endpoint Friendly Names in HvVirtualAudio.inf
 // {8D2A4E61-1010-4B9E-8F21-5C7E9A1D0001} -> "Hyper-V Console Speakers"
-DEFINE_GUID(HV_SPEAKER_NAME_GUID,
-    0x8d2a4e61, 0x1010, 0x4b9e, 0x8f, 0x21, 0x5c, 0x7e, 0x9a, 0x1d, 0x00, 0x01);
+static const GUID HV_SPEAKER_NAME_GUID =
+    { 0x8d2a4e61, 0x1010, 0x4b9e, { 0x8f, 0x21, 0x5c, 0x7e, 0x9a, 0x1d, 0x00, 0x01 } };
 
 // {8D2A4E61-1010-4B9E-8F21-5C7E9A1D0002} -> "Hyper-V Console Microphone"
-DEFINE_GUID(HV_MIC_NAME_GUID,
-    0x8d2a4e61, 0x1010, 0x4b9e, 0x8f, 0x21, 0x5c, 0x7e, 0x9a, 0x1d, 0x00, 0x02);
+static const GUID HV_MIC_NAME_GUID =
+    { 0x8d2a4e61, 0x1010, 0x4b9e, { 0x8f, 0x21, 0x5c, 0x7e, 0x9a, 0x1d, 0x00, 0x02 } };
 
 static KSDATARANGE g_TopoBridgeDataRanges[] = {
     {

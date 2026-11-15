@@ -300,7 +300,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
             "/I`"$WdkKmCrtInc`"",
             "/I`"$(Join-Path $SysSdkInc 'shared')`"",
             "/I`"$MsvcInc`"",
-            "/Fo`"$AudioObjDir\\`"",
+            "/Fo`"$AudioObjDir/`"",
             "`"$(Join-Path $AudioSrcDir 'Adapter.cpp')`"",
             "`"$(Join-Path $AudioSrcDir 'TopologyMiniport.cpp')`"",
             "`"$(Join-Path $AudioSrcDir 'WaveRTMiniport.cpp')`""

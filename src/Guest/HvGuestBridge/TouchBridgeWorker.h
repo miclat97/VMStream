@@ -29,7 +29,9 @@ private:
     std::unique_ptr<IHvTransport>  m_Transport;
     HANDLE                         m_DriverHandle;
     bool                           m_TouchInjectionInitialized;
-    bool                           m_LoggedDriverFallbackNotice;
+    bool                           m_LoggedDriverStatus;
+    bool                           m_LastDriverOpenState;
+    int                            m_PrimaryContactId;
     bool                           m_ActiveContactIds[128];
     POINT                          m_LastContactPixels[128];
     std::atomic<bool>              m_Running;

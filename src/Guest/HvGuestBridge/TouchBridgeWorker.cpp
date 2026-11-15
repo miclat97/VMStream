@@ -20,7 +20,9 @@ TouchBridgeWorker::TouchBridgeWorker(const std::string& tcpFallbackHost)
       )),
       m_DriverHandle(INVALID_HANDLE_VALUE),
       m_TouchInjectionInitialized(false),
-      m_LoggedDriverFallbackNotice(false),
+      m_LoggedDriverStatus(false),
+      m_LastDriverOpenState(false),
+      m_PrimaryContactId(-1),
       m_Running(false),
       m_LastScanTime(0),
       m_HadActiveContacts(false)
@@ -79,7 +81,26 @@ bool TouchBridgeWorker::EnsureDriverHandleOpen()
         nullptr
     );
 
-    return (m_DriverHandle != INVALID_HANDLE_VALUE);
+    if (m_DriverHandle != INVALID_HANDLE_VALUE) {
+        if (!m_LoggedDriverStatus || !m_LastDriverOpenState) {
+            m_LoggedDriverStatus = true;
+            m_LastDriverOpenState = true;
+            std::printf("[HvGuestBridge][Touch] Opened \\\\.\\HvTouchHid kernel VHF digitizer device.\n");
+        }
+        return true;
+    }
+
+    if (!m_LoggedDriverStatus || m_LastDriverOpenState) {
+        const DWORD err = GetLastError();
+        m_LoggedDriverStatus = true;
+        m_LastDriverOpenState = false;
+        std::printf(
+            "[HvGuestBridge][Touch] \\\\.\\HvTouchHid unavailable (err=%lu); using InjectTouchInput fallback.\n",
+            static_cast<unsigned long>(err)
+        );
+    }
+
+    return false;
 }
 
 void TouchBridgeWorker::CloseDriverHandle()
@@ -87,6 +108,7 @@ void TouchBridgeWorker::CloseDriverHandle()
     if (m_DriverHandle != INVALID_HANDLE_VALUE) {
         CloseHandle(m_DriverHandle);
         m_DriverHandle = INVALID_HANDLE_VALUE;
+        m_LoggedDriverStatus = false;
     }
 }
 
@@ -98,10 +120,6 @@ bool TouchBridgeWorker::EnsureUserModeTouchInjectionInitialized()
 
     if (InitializeTouchInjection(HV_MAX_TOUCH_CONTACTS, TOUCH_FEEDBACK_DEFAULT)) {
         m_TouchInjectionInitialized = true;
-        if (!m_LoggedDriverFallbackNotice) {
-            m_LoggedDriverFallbackNotice = true;
-            std::printf("[HvGuestBridge][Touch] Using Win32 Multi-Touch Digitizer Injection (InitializeTouchInjection) while HvTouchHid.sys is not loaded.\n");
-        }
         return true;
     }
 
@@ -146,32 +164,45 @@ void TouchBridgeWorker::InjectFrameUserMode(const HV_TOUCH_INPUT_REPORT& report)
             continue;
         }
 
+        if (isDown && m_PrimaryContactId < 0) {
+            m_PrimaryContactId = static_cast<int>(id);
+        }
+
         POINTER_TOUCH_INFO& ti = contacts[injectCount++];
         ti.pointerInfo.pointerType = PT_TOUCH;
         ti.pointerInfo.pointerId = id;
         ti.pointerInfo.ptPixelLocation.x = px;
         ti.pointerInfo.ptPixelLocation.y = py;
 
+        UINT32 ptrFlags = 0;
         if (isDown && !wasDown) {
-            ti.pointerInfo.pointerFlags = POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+            ptrFlags = POINTER_FLAG_DOWN | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
             m_ActiveContactIds[id] = true;
             m_LastContactPixels[id] = { px, py };
         } else if (isDown && wasDown) {
-            ti.pointerInfo.pointerFlags = POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
+            ptrFlags = POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT;
             m_LastContactPixels[id] = { px, py };
         } else {
-            ti.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+            ptrFlags = POINTER_FLAG_UP;
             m_ActiveContactIds[id] = false;
         }
 
+        if (c.Confidence != 0) {
+            ptrFlags |= POINTER_FLAG_CONFIDENCE;
+        }
+        if (m_PrimaryContactId == static_cast<int>(id)) {
+            ptrFlags |= POINTER_FLAG_PRIMARY;
+        }
+        ti.pointerInfo.pointerFlags = ptrFlags;
+
         ti.touchFlags = TOUCH_FLAG_NONE;
         ti.touchMask  = TOUCH_MASK_CONTACTAREA | TOUCH_MASK_ORIENTATION | TOUCH_MASK_PRESSURE;
-        ti.rcContact.left   = px - 2;
-        ti.rcContact.top    = py - 2;
-        ti.rcContact.right  = px + 2;
-        ti.rcContact.bottom = py + 2;
+        ti.rcContact.left   = px - 12;
+        ti.rcContact.top    = py - 12;
+        ti.rcContact.right  = px + 12;
+        ti.rcContact.bottom = py + 12;
         ti.orientation = 90;
-        ti.pressure    = 32000;
+        ti.pressure    = 512;
     }
 
     // Release any previously active contact IDs that were omitted from this frame
@@ -181,9 +212,21 @@ void TouchBridgeWorker::InjectFrameUserMode(const HV_TOUCH_INPUT_REPORT& report)
             ti.pointerInfo.pointerType = PT_TOUCH;
             ti.pointerInfo.pointerId = id;
             ti.pointerInfo.ptPixelLocation = m_LastContactPixels[id];
-            ti.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+            ti.pointerInfo.pointerFlags = POINTER_FLAG_UP | POINTER_FLAG_CONFIDENCE |
+                ((m_PrimaryContactId == static_cast<int>(id)) ? POINTER_FLAG_PRIMARY : 0u);
             m_ActiveContactIds[id] = false;
         }
+    }
+
+    bool anyStillActive = false;
+    for (uint8_t id = 0; id < 128; ++id) {
+        if (m_ActiveContactIds[id]) {
+            anyStillActive = true;
+            break;
+        }
+    }
+    if (!anyStillActive) {
+        m_PrimaryContactId = -1;
     }
 
     if (injectCount > 0) {
@@ -245,7 +288,8 @@ void TouchBridgeWorker::ReleaseAllTouchContacts()
                 ti.pointerInfo.pointerType = PT_TOUCH;
                 ti.pointerInfo.pointerId = id;
                 ti.pointerInfo.ptPixelLocation = m_LastContactPixels[id];
-                ti.pointerInfo.pointerFlags = POINTER_FLAG_UP;
+                ti.pointerInfo.pointerFlags = POINTER_FLAG_UP | POINTER_FLAG_CONFIDENCE |
+                    ((m_PrimaryContactId == static_cast<int>(id)) ? POINTER_FLAG_PRIMARY : 0u);
                 m_ActiveContactIds[id] = false;
             }
         }
@@ -254,6 +298,7 @@ void TouchBridgeWorker::ReleaseAllTouchContacts()
         }
     }
 
+    m_PrimaryContactId = -1;
     m_HadActiveContacts = false;
 }
 

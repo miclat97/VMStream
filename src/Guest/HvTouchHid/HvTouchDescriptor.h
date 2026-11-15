@@ -12,12 +12,18 @@
 
 #include "../../Shared/HvProtocol.h"
 
-// Single Finger Logical Collection Block (53 bytes per contact slot)
+// Single Finger Logical Collection Block
 // Encodes: Tip Switch (1b) + Confidence (1b) + Padding (6b) + Contact ID (8b) + X (16b) + Y (16b) = 6 bytes report payload
+// Physical dimensions represent a 16:9 display (34.56 cm x 19.44 cm at 10^-2 cm) so Windows 11
+// DirectManipulation / Precision Touch computes accurate physical scroll/pan/edge-swipe distances.
 #define HID_TOUCH_FINGER_BLOCK \
     0x05, 0x0D,                         /*   Usage Page (Digitizers)                */ \
     0x09, 0x22,                         /*   Usage (Finger)                         */ \
     0xA1, 0x02,                         /*   Collection (Logical)                   */ \
+    0x55, 0x00,                         /*     Unit Exponent (0)                    */ \
+    0x65, 0x00,                         /*     Unit (None)                          */ \
+    0x35, 0x00,                         /*     Physical Minimum (0)                 */ \
+    0x45, 0x00,                         /*     Physical Maximum (0)                 */ \
     0x09, 0x42,                         /*     Usage (Tip Switch)                   */ \
     0x09, 0x47,                         /*     Usage (Confidence)                   */ \
     0x15, 0x00,                         /*     Logical Minimum (0)                  */ \
@@ -33,16 +39,19 @@
     0x25, 0x7F,                         /*     Logical Maximum (127)                */ \
     0x81, 0x02,                         /*     Input (Data,Var,Abs) -> 1 byte       */ \
     0x05, 0x01,                         /*     Usage Page (Generic Desktop)         */ \
-    0x09, 0x30,                         /*     Usage (X)                            */ \
-    0x09, 0x31,                         /*     Usage (Y)                            */ \
     0x16, 0x00, 0x00,                   /*     Logical Minimum (0)                  */ \
     0x26, 0xFF, 0x7F,                   /*     Logical Maximum (32767)              */ \
-    0x36, 0x00, 0x00,                   /*     Physical Minimum (0)                 */ \
-    0x46, 0xFF, 0x7F,                   /*     Physical Maximum (32767)             */ \
-    0x66, 0x00, 0x00,                   /*     Unit (None)                          */ \
+    0x35, 0x00,                         /*     Physical Minimum (0)                 */ \
+    0x55, 0x0E,                         /*     Unit Exponent (-2 => 0.01 cm)        */ \
+    0x65, 0x11,                         /*     Unit (SI Linear: Centimeter)         */ \
     0x75, 0x10,                         /*     Report Size (16)                     */ \
-    0x95, 0x02,                         /*     Report Count (2)                     */ \
-    0x81, 0x02,                         /*     Input (Data,Var,Abs) -> 4 bytes X,Y  */ \
+    0x95, 0x01,                         /*     Report Count (1)                     */ \
+    0x46, 0x80, 0x0D,                   /*     Physical Maximum (3456 => 34.56 cm)  */ \
+    0x09, 0x30,                         /*     Usage (X)                            */ \
+    0x81, 0x02,                         /*     Input (Data,Var,Abs) -> 2 bytes X    */ \
+    0x46, 0x98, 0x07,                   /*     Physical Maximum (1944 => 19.44 cm)  */ \
+    0x09, 0x31,                         /*     Usage (Y)                            */ \
+    0x81, 0x02,                         /*     Input (Data,Var,Abs) -> 2 bytes Y    */ \
     0xC0                                /*   End Collection (Logical)               */
 
 // Complete HID Multi-Touch Digitizer Report Descriptor
@@ -75,6 +84,10 @@ static const uint8_t g_HvTouchReportDescriptor[] = {
 
     // --- Frame-level metadata (3 bytes) ---
     0x05, 0x0D,                         //   Usage Page (Digitizers)
+    0x55, 0x00,                         //   Unit Exponent (0)
+    0x65, 0x00,                         //   Unit (None)
+    0x35, 0x00,                         //   Physical Minimum (0)
+    0x45, 0x00,                         //   Physical Maximum (0)
     0x09, 0x54,                         //   Usage (Contact Count)
     0x15, 0x00,                         //   Logical Minimum (0)
     0x25, 0x0A,                         //   Logical Maximum (10)
@@ -87,6 +100,8 @@ static const uint8_t g_HvTouchReportDescriptor[] = {
     0x55, 0x0C,                         //   Unit Exponent (-4 => 100 microseconds resolution)
     0x15, 0x00,                         //   Logical Minimum (0)
     0x27, 0xFF, 0xFF, 0x00, 0x00,       //   Logical Maximum (65535)
+    0x35, 0x00,                         //   Physical Minimum (0)
+    0x47, 0xFF, 0xFF, 0x00, 0x00,       //   Physical Maximum (65535)
     0x75, 0x10,                         //   Report Size (16)
     0x95, 0x01,                         //   Report Count (1)
     0x81, 0x02,                         //   Input (Data,Var,Abs) -> 2 bytes
@@ -95,6 +110,11 @@ static const uint8_t g_HvTouchReportDescriptor[] = {
     // REPORT ID 2: Feature Report - Contact Count Maximum (2 bytes)
     // =========================================================================
     0x85, 0x02,                         //   Report ID (2)
+    0x05, 0x0D,                         //   Usage Page (Digitizers)
+    0x55, 0x00,                         //   Unit Exponent (0)
+    0x65, 0x00,                         //   Unit (None)
+    0x35, 0x00,                         //   Physical Minimum (0)
+    0x45, 0x00,                         //   Physical Maximum (0)
     0x09, 0x55,                         //   Usage (Contact Count Maximum)
     0x15, 0x00,                         //   Logical Minimum (0)
     0x25, 0x0A,                         //   Logical Maximum (10)

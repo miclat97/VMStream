@@ -19,6 +19,56 @@ namespace HvConsole.Host.UI;
 
 public sealed class ConsoleSessionForm : Form
 {
+    private const ushort VT_EMPTY     = 0;
+    private const ushort VT_BOOL      = 11;
+    private const short VARIANT_TRUE  = -1;
+    private const short VARIANT_FALSE = 0;
+
+    private static readonly Guid IidIPropertyStore = new("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
+    private static readonly PROPERTYKEY PkeyEdgeGestureDisableTouchWhenFullscreen = new()
+    {
+        fmtid = new Guid("32CE38B2-2C9A-41B1-9BC5-B3784394AA44"),
+        pid = 2
+    };
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct PROPERTYKEY
+    {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
+    private struct PROPVARIANT
+    {
+        [FieldOffset(0)] public ushort vt;
+        [FieldOffset(2)] public ushort wReserved1;
+        [FieldOffset(4)] public ushort wReserved2;
+        [FieldOffset(6)] public ushort wReserved3;
+        [FieldOffset(8)] public short boolVal;
+        [FieldOffset(8)] public IntPtr ptr1;
+        [FieldOffset(16)] public IntPtr ptr2;
+    }
+
+    [ComImport]
+    [Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPropertyStore
+    {
+        [PreserveSig] int GetCount([Out] out uint cProps);
+        [PreserveSig] int GetAt([In] uint iProp, [Out] out PROPERTYKEY pkey);
+        [PreserveSig] int GetValue([In] ref PROPERTYKEY key, [Out] out PROPVARIANT pv);
+        [PreserveSig] int SetValue([In] ref PROPERTYKEY key, [In] ref PROPVARIANT propvar);
+        [PreserveSig] int Commit();
+    }
+
+    [DllImport("shell32.dll")]
+    private static extern int SHGetPropertyStoreForWindow(
+        IntPtr hwnd,
+        [In] ref Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out IPropertyStore? propertyStore
+    );
+
     [DllImport("winmm.dll")]
     private static extern uint timeBeginPeriod(uint uPeriod);
 
@@ -38,8 +88,11 @@ public sealed class ConsoleSessionForm : Form
     private readonly QuickSettingsHudForm _hudForm;
     private readonly ToastOverlayForm _toastForm;
     private readonly System.Windows.Forms.Timer _subclassWatchdogTimer;
+    private readonly System.Windows.Forms.Timer _hookReassertTimer;
 
     private bool _isBorderlessFullscreen;
+    private bool _edgeGesturePropSet;
+    private bool _isClosing;
     private FormWindowState _savedWindowState = FormWindowState.Normal;
     private FormBorderStyle _savedBorderStyle = FormBorderStyle.Sizable;
     private Rectangle _savedWindowBounds = new(100, 100, 1440, 900);
@@ -88,6 +141,7 @@ public sealed class ConsoleSessionForm : Form
         _hudForm.RequestToggleFullscreen += () => BeginInvoke(ToggleBorderlessFullscreen);
         _hudForm.RequestDisconnect += () => BeginInvoke(Close);
         _hudForm.RequestToggleMicrophone += () => BeginInvoke(ToggleMicrophoneWithFeedback);
+        _hudForm.VisibleChanged += (_, _) => ScheduleKeyboardHookBringToFront();
 
         _keyboardHook.IsHudVisibleCallback = () => _hudForm.Visible;
         _keyboardHook.ToggleFullscreenRequested += () => BeginInvoke(ToggleBorderlessFullscreen);
@@ -97,6 +151,9 @@ public sealed class ConsoleSessionForm : Form
             if (_hudForm.Visible) _hudForm.Hide();
         });
         _keyboardHook.ToggleMicrophoneRequested += () => BeginInvoke(ToggleMicrophoneWithFeedback);
+
+        _touchInterceptor.RdpFocusAcquired += ScheduleKeyboardHookBringToFront;
+        Activated += (_, _) => ScheduleKeyboardHookBringToFront();
 
         _audioEngine.StateChanged += () =>
         {
@@ -139,14 +196,27 @@ public sealed class ConsoleSessionForm : Form
         _rdpControl.FatalError += OnRdpFatalError;
         _rdpControl.RemoteDesktopSizeChanged += OnRdpDesktopSizeChanged;
 
+        // Reassert WH_KEYBOARD_LL chain priority shortly after focus/connect/fullscreen transitions
+        // so Ctrl+Alt+Shift+* hotkeys stay ahead of mstscax.dll's KeyboardHookMode=1 hook.
+        _hookReassertTimer = new System.Windows.Forms.Timer { Interval = 150 };
+        _hookReassertTimer.Tick += (_, _) =>
+        {
+            _hookReassertTimer.Stop();
+            if (!IsDisposed && !_isClosing)
+            {
+                _keyboardHook.BringToFront();
+            }
+        };
+
         // Watchdog timer ensures IHWindowClass and all child windows remain subclassed
         // and unregistered from legacy WM_TOUCH even if mstscax.dll recreates them.
         _subclassWatchdogTimer = new System.Windows.Forms.Timer { Interval = 500 };
         _subclassWatchdogTimer.Tick += (_, _) =>
         {
-            if (_rdpControl.IsHandleCreated)
+            if (_rdpControl.IsHandleCreated &&
+                _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle) > 0)
             {
-                _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+                ScheduleKeyboardHookBringToFront();
             }
         };
     }
@@ -172,7 +242,10 @@ public sealed class ConsoleSessionForm : Form
             _rdpControl.CreateControl();
         }
 
-        _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+        if (_touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle) > 0)
+        {
+            ScheduleKeyboardHookBringToFront();
+        }
         _subclassWatchdogTimer.Start();
 
         BeginInvoke(() =>
@@ -181,6 +254,7 @@ public sealed class ConsoleSessionForm : Form
             {
                 _rdpControl.ConnectToHyperVConsole(_vmInfo.VmId);
                 _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+                ScheduleKeyboardHookBringToFront();
             }
             catch (Exception ex)
             {
@@ -199,9 +273,10 @@ public sealed class ConsoleSessionForm : Form
         }
         _statusBannerPanel.Visible = true;
         _lblBannerMessage.Text = $"Authenticating with Hyper-V VMMS (localhost:2179, PCB={_vmInfo.PcbGuidString})...";
-        if (_rdpControl.IsHandleCreated)
+        if (_rdpControl.IsHandleCreated &&
+            _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle) > 0)
         {
-            _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+            ScheduleKeyboardHookBringToFront();
         }
     }
 
@@ -225,6 +300,7 @@ public sealed class ConsoleSessionForm : Form
             _rdpControl.SyncFullScreenState(true);
         }
 
+        ScheduleKeyboardHookBringToFront();
         UpdateWindowTitleAndHud();
 
         _toastForm.ShowToast(
@@ -244,9 +320,10 @@ public sealed class ConsoleSessionForm : Form
             return;
         }
 
-        if (_rdpControl.IsHandleCreated)
+        if (_rdpControl.IsHandleCreated &&
+            _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle) > 0)
         {
-            _touchInterceptor.AttachToRdpControlHierarchy(_rdpControl.Handle);
+            ScheduleKeyboardHookBringToFront();
         }
     }
 
@@ -259,6 +336,7 @@ public sealed class ConsoleSessionForm : Form
         }
 
         _subclassWatchdogTimer.Stop();
+        _hookReassertTimer.Stop();
         _touchInterceptor.SendTouchReset();
         _audioEngine.SetMicrophonePrivacy(false);
 
@@ -332,8 +410,10 @@ public sealed class ConsoleSessionForm : Form
             );
         }
 
+        SetFullscreenEdgeGestureDisabled(enableFullscreen);
         _rdpControl.SyncFullScreenState(enableFullscreen);
         _rdpControl.Focus();
+        ScheduleKeyboardHookBringToFront();
     }
 
     // ========================================================================
@@ -345,6 +425,7 @@ public sealed class ConsoleSessionForm : Form
         {
             _hudForm.Hide();
             _rdpControl.Focus();
+            ScheduleKeyboardHookBringToFront();
         }
         else
         {
@@ -403,9 +484,78 @@ public sealed class ConsoleSessionForm : Form
         }
     }
 
+    private void ScheduleKeyboardHookBringToFront()
+    {
+        if (IsDisposed || _isClosing) return;
+
+        if (InvokeRequired)
+        {
+            try
+            {
+                if (IsHandleCreated)
+                {
+                    BeginInvoke(ScheduleKeyboardHookBringToFront);
+                }
+            }
+            catch { }
+            return;
+        }
+
+        _keyboardHook.BringToFront();
+        _hookReassertTimer.Stop();
+        _hookReassertTimer.Start();
+    }
+
+    private void SetFullscreenEdgeGestureDisabled(bool? disabled)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+
+        IPropertyStore? store = null;
+        try
+        {
+            Guid iid = IidIPropertyStore;
+            int hr = SHGetPropertyStoreForWindow(Handle, ref iid, out store);
+            if (hr < 0 || store == null) return;
+
+            PROPERTYKEY key = PkeyEdgeGestureDisableTouchWhenFullscreen;
+            PROPVARIANT pv = default;
+            if (disabled.HasValue)
+            {
+                pv.vt = VT_BOOL;
+                pv.boolVal = disabled.Value ? VARIANT_TRUE : VARIANT_FALSE;
+                _edgeGesturePropSet = true;
+            }
+            else
+            {
+                pv.vt = VT_EMPTY;
+                _edgeGesturePropSet = false;
+            }
+
+            store.SetValue(ref key, ref pv);
+            store.Commit();
+        }
+        catch
+        {
+        }
+        finally
+        {
+            if (store != null)
+            {
+                try { Marshal.FinalReleaseComObject(store); } catch { }
+            }
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        _isClosing = true;
         _subclassWatchdogTimer.Stop();
+        _hookReassertTimer.Stop();
+
+        if (_edgeGesturePropSet)
+        {
+            SetFullscreenEdgeGestureDisabled(null);
+        }
 
         try { _hudForm.Hide(); } catch { }
         try { _toastForm.Hide(); } catch { }
@@ -422,5 +572,15 @@ public sealed class ConsoleSessionForm : Form
         try { timeEndPeriod(1); } catch { }
 
         base.OnFormClosing(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _subclassWatchdogTimer.Dispose();
+            _hookReassertTimer.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

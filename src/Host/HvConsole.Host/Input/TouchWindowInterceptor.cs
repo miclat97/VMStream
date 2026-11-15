@@ -1,13 +1,15 @@
 // ============================================================================
 // TouchWindowInterceptor.cs - Complete mstscax.dll Touch & Mouse-Promotion Blocker
-// 1. Calls UnregisterTouchWindow on all mstscax.dll child windows so Windows
-//    delivers pure Win8/10/11 WM_POINTER messages instead of legacy WM_TOUCH.
-// 2. Subclasses all child windows inside RdpConsoleControl (IHWindowClass,
-//    OPWindowClass, UIMainClass, UIContainerClass, etc.) via SetWindowSubclass.
-// 3. Captures WM_POINTERDOWN / WM_POINTERUPDATE / WM_POINTERUP, normalizes
-//    coordinates to [0..32767], and streams 64-byte HID frames over AF_HYPERV.
-// 4. Swallows WM_POINTER*, WM_TOUCH, WM_GESTURE, and MI_WP_SIGNATURE synthesized
-//    mouse messages so mstscax.dll NEVER emulates a mouse cursor on touch!
+// 1. Installs thread-local WH_CALLWNDPROC hooks when mstscax.dll child windows
+//    (IHWindowClass, OPWindowClass, UIMainClass, UIContainerClass, etc.) belong
+//    to background threads so UnregisterTouchWindow, SetGestureConfig,
+//    SetWindowFeedbackSetting, and SetWindowSubclass execute on the owning HWND thread.
+// 2. Captures synchronized WM_POINTER* / WM_NCPOINTER* touch frames via
+//    GetPointerFrameTouchInfo + SkipPointerFrameMessages, normalizes [0..32767]
+//    with bezel edge snap, and streams 64-byte HID frames over AF_HYPERV.
+// 3. Swallows WM_POINTER*, WM_NCPOINTER*, WM_TOUCH, WM_GESTURE*, WM_CONTEXTMENU,
+//    and MI_WP_SIGNATURE synthesized mouse messages so mstscax.dll never emulates
+//    mouse clicks or drags on touch input.
 // ============================================================================
 using System;
 using System.Collections.Generic;
@@ -22,7 +24,16 @@ namespace HvConsole.Host.Input;
 
 public sealed class TouchWindowInterceptor : IDisposable
 {
+    private const uint WM_NULL                  = 0x0000;
+    private const uint WM_SETFOCUS              = 0x0007;
     private const uint WM_SETCURSOR             = 0x0020;
+    private const uint WM_CONTEXTMENU           = 0x007B;
+    private const uint WM_NCDESTROY             = 0x0082;
+    private const uint WM_NCMOUSEMOVE           = 0x00A0;
+    private const uint WM_NCLBUTTONDOWN         = 0x00A1;
+    private const uint WM_NCLBUTTONUP           = 0x00A2;
+    private const uint WM_NCRBUTTONDOWN         = 0x00A4;
+    private const uint WM_NCRBUTTONUP           = 0x00A5;
     private const uint WM_GESTURE               = 0x0119;
     private const uint WM_GESTURENOTIFY         = 0x011A;
     private const uint WM_MOUSEMOVE             = 0x0200;
@@ -35,6 +46,9 @@ public sealed class TouchWindowInterceptor : IDisposable
     private const uint WM_MBUTTONDOWN           = 0x0207;
     private const uint WM_MBUTTONUP             = 0x0208;
     private const uint WM_TOUCH                 = 0x0240;
+    private const uint WM_NCPOINTERUPDATE       = 0x0241;
+    private const uint WM_NCPOINTERDOWN         = 0x0242;
+    private const uint WM_NCPOINTERUP           = 0x0243;
     private const uint WM_POINTERUPDATE         = 0x0245;
     private const uint WM_POINTERDOWN           = 0x0246;
     private const uint WM_POINTERUP             = 0x0247;
@@ -46,9 +60,17 @@ public sealed class TouchWindowInterceptor : IDisposable
     private const uint WM_MOUSELEAVE            = 0x02A3;
 
     private const uint PT_TOUCH = 0x00000002;
-    private const uint PT_PEN   = 0x00000003;
 
-    private const int MA_ACTIVATE = 1;
+    private const uint POINTER_FLAG_INCONTACT = 0x00000004u;
+    private const uint POINTER_FLAG_CANCELED  = 0x00008000u;
+    private const uint POINTER_FLAG_DOWN      = 0x00010000u;
+    private const uint POINTER_FLAG_UP        = 0x00040000u;
+
+    private const int WH_CALLWNDPROC    = 4;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+    private const uint GC_ALLGESTURES   = 0x00000001u;
+    private const int PA_ACTIVATE       = 1;
+    private const int EdgeSnapThresholdPx = 8;
 
     // Microsoft signature for mouse messages synthesized from Touch / Pen:
     // (GetMessageExtraInfo() & 0xFFFFFF00) == 0xFF515700 (MI_WP_SIGNATURE)
@@ -58,6 +80,7 @@ public sealed class TouchWindowInterceptor : IDisposable
     private static readonly UIntPtr SubclassId = new(0x564D5354); // 'VMST'
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
     private delegate IntPtr SubclassProc(
         IntPtr hWnd,
         uint uMsg,
@@ -83,6 +106,14 @@ public sealed class TouchWindowInterceptor : IDisposable
         public int Bottom;
         public readonly int Width => Right - Left;
         public readonly int Height => Bottom - Top;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GESTURECONFIG
+    {
+        public uint dwID;
+        public uint dwWant;
+        public uint dwBlock;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -118,6 +149,12 @@ public sealed class TouchWindowInterceptor : IDisposable
         public uint pressure;
     }
 
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool EnableMouseInPointer(bool fEnable);
 
@@ -139,11 +176,53 @@ public sealed class TouchWindowInterceptor : IDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetClassNameW(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookExW(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutW(
+        IntPtr hWnd,
+        uint Msg,
+        UIntPtr wParam,
+        IntPtr lParam,
+        uint fuFlags,
+        uint uTimeout,
+        out UIntPtr lpdwResult
+    );
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DefWindowProcW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetPointerType(uint pointerId, out uint pointerType);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetPointerTouchInfo(uint pointerId, out POINTER_TOUCH_INFO touchInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern unsafe bool GetPointerFrameTouchInfo(
+        uint pointerId,
+        ref uint pointerCount,
+        POINTER_TOUCH_INFO* touchInfo
+    );
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SkipPointerFrameMessages(uint pointerId);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
@@ -158,6 +237,15 @@ public sealed class TouchWindowInterceptor : IDisposable
         uint dwFlags,
         uint size,
         ref int configuration
+    );
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetGestureConfig(
+        IntPtr hwnd,
+        uint dwReserved,
+        uint cIDs,
+        ref GESTURECONFIG pGestureConfig,
+        uint cbSize
     );
 
     [DllImport("comctl32.dll", SetLastError = true)]
@@ -183,27 +271,61 @@ public sealed class TouchWindowInterceptor : IDisposable
         IntPtr lParam
     );
 
+    private enum PendingOpKind
+    {
+        AttachOrReconfigure,
+        Detach
+    }
+
+    private readonly struct PendingWindowOp
+    {
+        public PendingWindowOp(IntPtr hwnd, string className, PendingOpKind kind)
+        {
+            Hwnd = hwnd;
+            ClassName = className;
+            Kind = kind;
+        }
+
+        public IntPtr Hwnd { get; }
+        public string ClassName { get; }
+        public PendingOpKind Kind { get; }
+    }
+
     private struct ActiveContactSlot
     {
         public bool Occupied;
         public bool TipSwitch;
+        public bool Confidence;
         public uint Win32PointerId;
         public byte ContactId;
         public ushort X;
         public ushort Y;
+        public IntPtr SourceDevice;
     }
 
     private readonly IHvTransport _touchTransport;
     private readonly SubclassProc _subclassDelegate;
+    private readonly HookProc _callWndProcDelegate;
+    private readonly uint _currentProcessId;
+    private readonly long _qpcOrigin;
+
     private readonly HashSet<IntPtr> _subclassedHwnds = new();
+    private readonly Dictionary<uint, IntPtr> _threadHooks = new();
+    private readonly Dictionary<uint, List<PendingWindowOp>> _pendingOpsByThread = new();
+    private readonly object _stateLock = new();
+
     private readonly ActiveContactSlot[] _slots = new ActiveContactSlot[HvProtocolConstants.MaxTouchContacts];
     private readonly object _touchLock = new();
+
     private IntPtr _rdpRootHwnd;
+    private int _pendingOpCount;
     private int _activeTouchCount;
     private long _lastTouchTickMs;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public int ActiveTouchPoints => Volatile.Read(ref _activeTouchCount);
+
+    public event Action? RdpFocusAcquired;
 
     public static void ConfigureProcessTouchSettings()
     {
@@ -218,85 +340,213 @@ public sealed class TouchWindowInterceptor : IDisposable
     public TouchWindowInterceptor(IHvTransport touchTransport)
     {
         _touchTransport = touchTransport;
-        // Keep delegate rooted for the lifetime of the interceptor
+        _currentProcessId = GetCurrentProcessId();
+        _qpcOrigin = Stopwatch.GetTimestamp();
+
+        // Keep delegates rooted for the lifetime of the interceptor
         _subclassDelegate = SubclassWndProc;
+        _callWndProcDelegate = CallWndProc;
     }
 
     /// <summary>
-    /// Recursively subclasses the RDP ActiveX control and ALL of its internal child windows
-    /// (IHWindowClass, OPWindowClass, UIMainClass, UIContainerClass, ATL:*, etc.) and calls
-    /// UnregisterTouchWindow on each HWND so mstscax.dll cannot use legacy WM_TOUCH mouse emulation.
+    /// Recursively prepares and subclasses the RDP ActiveX control and ALL internal
+    /// mstscax.dll child windows (IHWindowClass, OPWindowClass, UIMainClass,
+    /// UIContainerClass, ATL:*, etc.) on each window's owning thread.
     /// </summary>
     public int AttachToRdpControlHierarchy(IntPtr rdpRootHwnd)
     {
         if (rdpRootHwnd == IntPtr.Zero || _disposed) return 0;
 
         _rdpRootHwnd = rdpRootHwnd;
-        int newlyAttached = 0;
-        var classBuilder = new StringBuilder(128);
-
-        // First attach to the root ActiveX HWND itself
-        if (PrepareAndSubclassWindow(rdpRootHwnd, "AxRdpRoot"))
+        var candidates = new List<(IntPtr Hwnd, string ClassName)>(16)
         {
-            newlyAttached++;
-        }
+            (rdpRootHwnd, "AxRdpRoot")
+        };
 
-        // Attach to EVERY child window inside the mstscax.dll hierarchy
+        var classBuilder = new StringBuilder(128);
         EnumChildWindows(rdpRootHwnd, (childHwnd, _) =>
         {
             classBuilder.Clear();
             string className = GetClassNameW(childHwnd, classBuilder, classBuilder.Capacity) > 0
                 ? classBuilder.ToString()
                 : "UnknownChild";
-
-            if (PrepareAndSubclassWindow(childHwnd, className))
-            {
-                newlyAttached++;
-            }
+            candidates.Add((childHwnd, className));
             return true;
         }, IntPtr.Zero);
 
-        return newlyAttached;
-    }
-
-    private bool PrepareAndSubclassWindow(IntPtr hwnd, string className)
-    {
-        if (hwnd == IntPtr.Zero) return false;
-
-        // CRITICAL: mstscax.dll calls RegisterTouchWindow() on its internal child windows
-        // (such as IHWindowClass), which switches the HWND from Win8+ WM_POINTER delivery
-        // to legacy Win7 WM_TOUCH delivery (causing mouse cursor emulation).
-        // Calling UnregisterTouchWindow() forces Windows back to delivering pure WM_POINTER*
-        // events directly to our SubclassWndProc!
-        try
+        // Prune any previously tracked handles that Windows has destroyed
+        lock (_stateLock)
         {
-            if (IsTouchWindow(hwnd, out _))
+            if (_subclassedHwnds.Count > 0)
             {
-                UnregisterTouchWindow(hwnd);
-            }
-            else
-            {
-                UnregisterTouchWindow(hwnd);
+                _subclassedHwnds.RemoveWhere(h => !IsWindow(h));
             }
         }
-        catch { }
 
-        // Suppress host visual touch ripples / press-and-hold circles on the VM viewport
-        DisableHostTouchVisualFeedback(hwnd);
+        uint currentTid = GetCurrentThreadId();
+        int attachedOrScheduled = 0;
 
-        if (_subclassedHwnds.Contains(hwnd))
+        foreach (var (hwnd, className) in candidates)
         {
-            return false;
+            if (_disposed || hwnd == IntPtr.Zero || !IsWindow(hwnd)) continue;
+
+            uint ownerTid = GetWindowThreadProcessId(hwnd, out uint ownerPid);
+            if (ownerTid == 0 || ownerPid != _currentProcessId) continue;
+
+            bool alreadySubclassed;
+            lock (_stateLock)
+            {
+                alreadySubclassed = _subclassedHwnds.Contains(hwnd);
+            }
+
+            bool legacyTouchRegistered = false;
+            try { legacyTouchRegistered = IsTouchWindow(hwnd, out _); } catch { }
+
+            if (alreadySubclassed && !legacyTouchRegistered)
+            {
+                continue;
+            }
+
+            if (ownerTid == currentTid)
+            {
+                if (ExecuteConfigureAndSubclassOnOwningThread(hwnd, className))
+                {
+                    attachedOrScheduled++;
+                }
+            }
+            else if (DispatchRemoteThreadOp(hwnd, ownerTid, className, PendingOpKind.AttachOrReconfigure, timeoutMs: 100))
+            {
+                attachedOrScheduled++;
+            }
+        }
+
+        return attachedOrScheduled;
+    }
+
+    private bool DispatchRemoteThreadOp(IntPtr hwnd, uint targetTid, string className, PendingOpKind kind, uint timeoutMs)
+    {
+        lock (_stateLock)
+        {
+            if (!_threadHooks.ContainsKey(targetTid))
+            {
+                IntPtr hHook = SetWindowsHookExW(WH_CALLWNDPROC, _callWndProcDelegate, IntPtr.Zero, targetTid);
+                if (hHook == IntPtr.Zero)
+                {
+                    Debug.WriteLine($"[TouchWindowInterceptor] SetWindowsHookExW failed for TID {targetTid}, err={Marshal.GetLastWin32Error()}");
+                    return false;
+                }
+                _threadHooks[targetTid] = hHook;
+            }
+
+            if (!_pendingOpsByThread.TryGetValue(targetTid, out var list))
+            {
+                list = new List<PendingWindowOp>(4);
+                _pendingOpsByThread[targetTid] = list;
+            }
+
+            bool alreadyQueued = false;
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (list[i].Hwnd == hwnd && list[i].Kind == kind)
+                {
+                    alreadyQueued = true;
+                    break;
+                }
+            }
+
+            if (!alreadyQueued)
+            {
+                list.Add(new PendingWindowOp(hwnd, className, kind));
+                Interlocked.Increment(ref _pendingOpCount);
+            }
+        }
+
+        // Release _stateLock BEFORE synchronous cross-thread send to prevent deadlocks
+        IntPtr sendRes = SendMessageTimeoutW(hwnd, WM_NULL, UIntPtr.Zero, IntPtr.Zero, SMTO_ABORTIFHUNG, timeoutMs, out _);
+        return sendRes != IntPtr.Zero;
+    }
+
+    private IntPtr CallWndProc(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && Volatile.Read(ref _pendingOpCount) > 0)
+        {
+            List<PendingWindowOp>? opsToRun = null;
+            uint currentTid = GetCurrentThreadId();
+
+            lock (_stateLock)
+            {
+                if (_pendingOpsByThread.TryGetValue(currentTid, out var queued) && queued.Count > 0)
+                {
+                    opsToRun = new List<PendingWindowOp>(queued);
+                    Interlocked.Add(ref _pendingOpCount, -queued.Count);
+                    queued.Clear();
+                }
+            }
+
+            if (opsToRun != null)
+            {
+                for (int i = 0; i < opsToRun.Count; i++)
+                {
+                    var op = opsToRun[i];
+                    if (op.Kind == PendingOpKind.AttachOrReconfigure)
+                    {
+                        if (!_disposed && IsWindow(op.Hwnd))
+                        {
+                            ExecuteConfigureAndSubclassOnOwningThread(op.Hwnd, op.ClassName);
+                        }
+                    }
+                    else if (op.Kind == PendingOpKind.Detach)
+                    {
+                        ExecuteDetachOnOwningThread(op.Hwnd);
+                    }
+                }
+            }
+        }
+
+        return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+
+    private bool ExecuteConfigureAndSubclassOnOwningThread(IntPtr hwnd, string className)
+    {
+        if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
+
+        // CRITICAL: mstscax.dll calls RegisterTouchWindow() on its internal child windows
+        // (such as IHWindowClass) on a background thread. UnregisterTouchWindow MUST succeed
+        // to switch Windows from legacy WM_TOUCH mouse emulation back to pure WM_POINTER*.
+        try { UnregisterTouchWindow(hwnd); } catch { }
+
+        DisableHostTouchVisualFeedback(hwnd);
+        DisableLegacyGestures(hwnd);
+
+        lock (_stateLock)
+        {
+            if (_subclassedHwnds.Contains(hwnd))
+            {
+                return false;
+            }
         }
 
         if (SetWindowSubclass(hwnd, _subclassDelegate, SubclassId, UIntPtr.Zero))
         {
-            _subclassedHwnds.Add(hwnd);
-            Debug.WriteLine($"[TouchWindowInterceptor] Subclassed {className} (HWND=0x{hwnd:X})");
+            lock (_stateLock)
+            {
+                _subclassedHwnds.Add(hwnd);
+            }
+            Debug.WriteLine($"[TouchWindowInterceptor] Subclassed {className} (HWND=0x{hwnd:X}, TID={GetCurrentThreadId()})");
             return true;
         }
 
+        Debug.WriteLine($"[TouchWindowInterceptor] SetWindowSubclass failed for {className} (HWND=0x{hwnd:X}, err={Marshal.GetLastWin32Error()})");
         return false;
+    }
+
+    private void ExecuteDetachOnOwningThread(IntPtr hwnd)
+    {
+        try { RemoveWindowSubclass(hwnd, _subclassDelegate, SubclassId); } catch { }
+        lock (_stateLock)
+        {
+            _subclassedHwnds.Remove(hwnd);
+        }
     }
 
     private static void DisableHostTouchVisualFeedback(IntPtr hwnd)
@@ -304,13 +554,29 @@ public sealed class TouchWindowInterceptor : IDisposable
         try
         {
             // FEEDBACK_TOUCH_CONTACTVISUALIZATION (1), FEEDBACK_TOUCH_TAP (7),
-            // FEEDBACK_TOUCH_DOUBLETAP (8), FEEDBACK_TOUCH_PRESSANDHOLD (9), FEEDBACK_TOUCH_RIGHTTAP (10)
-            int[] feedbackTypes = { 1, 7, 8, 9, 10 };
+            // FEEDBACK_TOUCH_DOUBLETAP (8), FEEDBACK_TOUCH_PRESSANDHOLD (9),
+            // FEEDBACK_TOUCH_RIGHTTAP (10), FEEDBACK_GESTURE_PRESSANDTAP (11)
+            int[] feedbackTypes = { 1, 7, 8, 9, 10, 11 };
             foreach (int fb in feedbackTypes)
             {
                 int disabled = 0;
                 SetWindowFeedbackSetting(hwnd, fb, 0, sizeof(int), ref disabled);
             }
+        }
+        catch { }
+    }
+
+    private static void DisableLegacyGestures(IntPtr hwnd)
+    {
+        try
+        {
+            var gc = new GESTURECONFIG
+            {
+                dwID = 0,
+                dwWant = 0,
+                dwBlock = GC_ALLGESTURES
+            };
+            SetGestureConfig(hwnd, 0, 1, ref gc, (uint)Marshal.SizeOf<GESTURECONFIG>());
         }
         catch { }
     }
@@ -331,26 +597,27 @@ public sealed class TouchWindowInterceptor : IDisposable
 
     private bool IsTouchPromotedMouseMessage()
     {
-        // 1. Check Microsoft MI_WP_SIGNATURE on GetMessageExtraInfo()
         ulong extra = unchecked((ulong)GetMessageExtraInfo().ToInt64());
         if ((extra & MI_WP_SIGNATURE_MASK) == MI_WP_SIGNATURE)
         {
             return true;
         }
 
-        // 2. Also suppress mouse synthesis while any finger is touching or within 180ms of lift
         if (Volatile.Read(ref _activeTouchCount) > 0)
         {
             return true;
         }
 
         long elapsedSinceTouch = Environment.TickCount64 - Interlocked.Read(ref _lastTouchTickMs);
-        if (elapsedSinceTouch >= 0 && elapsedSinceTouch < 180)
-        {
-            return true;
-        }
+        return elapsedSinceTouch >= 0 && elapsedSinceTouch < 250;
+    }
 
-        return false;
+    private bool IsWindowInRdpHierarchy(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return false;
+        IntPtr root = _rdpRootHwnd;
+        if (root == IntPtr.Zero) return false;
+        return hwnd == root || IsChild(root, hwnd);
     }
 
     private IntPtr SubclassWndProc(
@@ -363,19 +630,58 @@ public sealed class TouchWindowInterceptor : IDisposable
     {
         switch (uMsg)
         {
+            case WM_NCDESTROY:
+            {
+                IntPtr res = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+                try { RemoveWindowSubclass(hWnd, _subclassDelegate, SubclassId); } catch { }
+                lock (_stateLock)
+                {
+                    _subclassedHwnds.Remove(hWnd);
+                }
+                return res;
+            }
+
+            case WM_SETFOCUS:
+            {
+                IntPtr res = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+                try { RdpFocusAcquired?.Invoke(); } catch { }
+                return res;
+            }
+
             case WM_POINTERDOWN:
             case WM_POINTERUPDATE:
             case WM_POINTERUP:
+            case WM_NCPOINTERDOWN:
+            case WM_NCPOINTERUPDATE:
+            case WM_NCPOINTERUP:
+            {
+                uint pointerId = (uint)(wParam.ToInt64() & 0xFFFF);
+                if (GetPointerType(pointerId, out uint pointerType) && pointerType == PT_TOUCH)
+                {
+                    Interlocked.Exchange(ref _lastTouchTickMs, Environment.TickCount64);
+                    HandleTouchPointerFrameEvent(hWnd, pointerId);
+                    return IntPtr.Zero;
+                }
+                break;
+            }
+
             case WM_POINTERCAPTURECHANGED:
             {
                 uint pointerId = (uint)(wParam.ToInt64() & 0xFFFF);
                 if (GetPointerType(pointerId, out uint pointerType) && pointerType == PT_TOUCH)
                 {
                     Interlocked.Exchange(ref _lastTouchTickMs, Environment.TickCount64);
-                    bool isDownOrUpdate = (uMsg == WM_POINTERDOWN || uMsg == WM_POINTERUPDATE);
-                    HandleTouchPointerEvent(hWnd, pointerId, isDownOrUpdate);
-                    // Return 0 WITHOUT calling DefSubclassProc so neither mstscax.dll nor
-                    // DefWindowProc ever sees the touch event or promotes it to a mouse click!
+
+                    // If capture simply shifted to another child inside _rdpRootHwnd (e.g., UIMainClass -> IHWindowClass)
+                    // and the pointer is neither UP nor CANCELED, keep the touch contact down so drags/holds don't abort!
+                    if (IsWindowInRdpHierarchy(lParam) &&
+                        (!GetPointerTouchInfo(pointerId, out POINTER_TOUCH_INFO capInfo) ||
+                         (capInfo.pointerInfo.pointerFlags & (POINTER_FLAG_UP | POINTER_FLAG_CANCELED)) == 0))
+                    {
+                        return IntPtr.Zero;
+                    }
+
+                    HandleSinglePointerRelease(hWnd, pointerId);
                     return IntPtr.Zero;
                 }
                 break;
@@ -399,14 +705,13 @@ public sealed class TouchWindowInterceptor : IDisposable
                 if (GetPointerType(pointerId, out uint pointerType) && pointerType == PT_TOUCH)
                 {
                     Interlocked.Exchange(ref _lastTouchTickMs, Environment.TickCount64);
-                    return new IntPtr(MA_ACTIVATE);
+                    return new IntPtr(PA_ACTIVATE);
                 }
                 break;
             }
 
             case WM_TOUCH:
             {
-                // If mstscax.dll re-registered legacy touch on this HWND, unregister it immediately
                 Interlocked.Exchange(ref _lastTouchTickMs, Environment.TickCount64);
                 if (lParam != IntPtr.Zero)
                 {
@@ -416,8 +721,13 @@ public sealed class TouchWindowInterceptor : IDisposable
                 return IntPtr.Zero;
             }
 
-            case WM_GESTURE:
             case WM_GESTURENOTIFY:
+            {
+                DisableLegacyGestures(hWnd);
+                return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+            }
+
+            case WM_GESTURE:
             {
                 if (IsTouchPromotedMouseMessage())
                 {
@@ -426,6 +736,7 @@ public sealed class TouchWindowInterceptor : IDisposable
                 break;
             }
 
+            case WM_CONTEXTMENU:
             case WM_MOUSEMOVE:
             case WM_LBUTTONDOWN:
             case WM_LBUTTONUP:
@@ -437,8 +748,14 @@ public sealed class TouchWindowInterceptor : IDisposable
             case WM_MBUTTONUP:
             case WM_MOUSEHOVER:
             case WM_MOUSELEAVE:
+            case WM_NCMOUSEMOVE:
+            case WM_NCLBUTTONDOWN:
+            case WM_NCLBUTTONUP:
+            case WM_NCRBUTTONDOWN:
+            case WM_NCRBUTTONUP:
             {
-                // Swallow all touch-synthesized mouse events so mstscax.dll never moves or clicks the mouse cursor
+                // Swallow all touch-synthesized mouse and context-menu events so mstscax.dll never
+                // moves the mouse cursor or opens mouse context menus on touch hold / edge drag
                 if (IsTouchPromotedMouseMessage())
                 {
                     return IntPtr.Zero;
@@ -459,88 +776,260 @@ public sealed class TouchWindowInterceptor : IDisposable
         return DefSubclassProc(hWnd, uMsg, wParam, lParam);
     }
 
-    private void HandleTouchPointerEvent(IntPtr targetHwnd, uint pointerId, bool isTipDown)
+    private unsafe void HandleTouchPointerFrameEvent(IntPtr targetHwnd, uint pointerId)
     {
-        if (!GetPointerTouchInfo(pointerId, out POINTER_TOUCH_INFO touchInfo))
+        uint pointerCount = 16;
+        POINTER_TOUCH_INFO* stackInfos = stackalloc POINTER_TOUCH_INFO[(int)pointerCount];
+
+        if (GetPointerFrameTouchInfo(pointerId, ref pointerCount, stackInfos) && pointerCount > 0)
         {
+            ProcessTouchFrame(stackInfos, (int)pointerCount, targetHwnd, fromFullFrame: true);
+            try { SkipPointerFrameMessages(pointerId); } catch { }
             return;
         }
 
-        IntPtr normHwnd = (_rdpRootHwnd != IntPtr.Zero) ? _rdpRootHwnd : targetHwnd;
-        POINT pt = touchInfo.pointerInfo.ptPixelLocation;
-        ScreenToClient(normHwnd, ref pt);
-        GetClientRect(normHwnd, out RECT clientRect);
-
-        if (clientRect.Width <= 0 || clientRect.Height <= 0)
+        // Fallback if frame exceeded stack buffer or pointer metadata requires dynamic allocation
+        uint neededCount = 0;
+        if (!GetPointerFrameTouchInfo(pointerId, ref neededCount, null) && neededCount > 16 && neededCount <= 64)
         {
-            pt = touchInfo.pointerInfo.ptPixelLocation;
-            ScreenToClient(targetHwnd, ref pt);
-            GetClientRect(targetHwnd, out clientRect);
+            var heapInfos = new POINTER_TOUCH_INFO[neededCount];
+            fixed (POINTER_TOUCH_INFO* heapPtr = heapInfos)
+            {
+                uint count = neededCount;
+                if (GetPointerFrameTouchInfo(pointerId, ref count, heapPtr) && count > 0)
+                {
+                    ProcessTouchFrame(heapPtr, (int)count, targetHwnd, fromFullFrame: true);
+                    try { SkipPointerFrameMessages(pointerId); } catch { }
+                    return;
+                }
+            }
         }
 
-        int width = Math.Max(1, clientRect.Width);
-        int height = Math.Max(1, clientRect.Height);
+        // Single-pointer fallback if frame retrieval is unavailable
+        if (GetPointerTouchInfo(pointerId, out POINTER_TOUCH_INFO singleInfo))
+        {
+            ProcessTouchFrame(&singleInfo, 1, targetHwnd, fromFullFrame: false);
+        }
+    }
 
-        int clampedX = Math.Clamp(pt.X, 0, width);
-        int clampedY = Math.Clamp(pt.Y, 0, height);
-
-        ushort normX = (ushort)((clampedX * (long)HvProtocolConstants.TouchCoordinateMax) / width);
-        ushort normY = (ushort)((clampedY * (long)HvProtocolConstants.TouchCoordinateMax) / height);
+    private unsafe void HandleSinglePointerRelease(IntPtr targetHwnd, uint pointerId)
+    {
+        if (GetPointerTouchInfo(pointerId, out POINTER_TOUCH_INFO singleInfo))
+        {
+            singleInfo.pointerInfo.pointerFlags |= POINTER_FLAG_UP;
+            singleInfo.pointerInfo.pointerFlags &= ~POINTER_FLAG_INCONTACT;
+            ProcessTouchFrame(&singleInfo, 1, targetHwnd, fromFullFrame: false);
+            return;
+        }
 
         HvTouchInputReport report = default;
         report.ReportId = HvProtocolConstants.TouchReportIdInput;
-        // Scan Time in 100 microsecond (0.1 ms) units required by Windows 11 DirectManipulation
-        report.ScanTime = (ushort)((Stopwatch.GetTimestamp() * 10000L / Stopwatch.Frequency) & 0xFFFF);
+        report.ScanTime = ComputeScanTime();
 
+        bool shouldSend = false;
         lock (_touchLock)
         {
-            int slotIndex = FindOrAllocateSlot(pointerId, isTipDown);
+            int slotIndex = FindOrAllocateSlot(pointerId, allowAllocate: false);
             if (slotIndex < 0)
             {
                 return;
             }
 
-            ref var slot = ref _slots[slotIndex];
-            slot.TipSwitch = isTipDown;
-            slot.X = normX;
-            slot.Y = normY;
+            _slots[slotIndex].TipSwitch = false;
+            _slots[slotIndex].Confidence = true;
 
-            byte reportCount = 0;
-            int touchDownCount = 0;
+            Span<bool> releaseMask = stackalloc bool[HvProtocolConstants.MaxTouchContacts];
+            releaseMask[slotIndex] = true;
+            PackAndReleaseSlots(ref report, releaseMask);
+            shouldSend = report.ContactCount > 0;
+        }
 
-            for (int i = 0; i < HvProtocolConstants.MaxTouchContacts; i++)
+        if (shouldSend)
+        {
+            _touchTransport.SendStruct(HvPacketType.TouchFrame, in report);
+        }
+    }
+
+    private unsafe void ProcessTouchFrame(
+        POINTER_TOUCH_INFO* infos,
+        int frameCount,
+        IntPtr targetHwnd,
+        bool fromFullFrame)
+    {
+        IntPtr normHwnd = (_rdpRootHwnd != IntPtr.Zero) ? _rdpRootHwnd : targetHwnd;
+        GetClientRect(normHwnd, out RECT clientRect);
+        if (clientRect.Width <= 0 || clientRect.Height <= 0)
+        {
+            normHwnd = targetHwnd;
+            GetClientRect(normHwnd, out clientRect);
+        }
+
+        int width = Math.Max(1, clientRect.Width);
+        int height = Math.Max(1, clientRect.Height);
+        int maxX = Math.Max(1, width - 1);
+        int maxY = Math.Max(1, height - 1);
+
+        HvTouchInputReport report = default;
+        report.ReportId = HvProtocolConstants.TouchReportIdInput;
+        report.ScanTime = ComputeScanTime();
+
+        bool shouldSend = false;
+        IntPtr frameSourceDevice = IntPtr.Zero;
+
+        lock (_touchLock)
+        {
+            Span<bool> seenSlots = stackalloc bool[HvProtocolConstants.MaxTouchContacts];
+            Span<bool> releaseAfterSend = stackalloc bool[HvProtocolConstants.MaxTouchContacts];
+
+            for (int i = 0; i < frameCount; i++)
             {
-                if (_slots[i].Occupied)
+                POINTER_TOUCH_INFO info = infos[i];
+                if (info.pointerInfo.pointerType != PT_TOUCH)
                 {
-                    var contact = HvTouchContact.Create(
-                        _slots[i].ContactId,
-                        _slots[i].X,
-                        _slots[i].Y,
-                        _slots[i].TipSwitch,
-                        confidence: true
-                    );
-                    report.SetContact(reportCount, in contact);
-                    reportCount++;
+                    continue;
+                }
 
-                    if (_slots[i].TipSwitch)
+                if (frameSourceDevice == IntPtr.Zero && info.pointerInfo.sourceDevice != IntPtr.Zero)
+                {
+                    frameSourceDevice = info.pointerInfo.sourceDevice;
+                }
+
+                uint pid = info.pointerInfo.pointerId;
+                uint flags = info.pointerInfo.pointerFlags;
+
+                bool isUp = (flags & POINTER_FLAG_UP) != 0;
+                bool isCanceled = (flags & POINTER_FLAG_CANCELED) != 0;
+                bool isInContact = (flags & POINTER_FLAG_INCONTACT) != 0;
+                bool isDown = (flags & POINTER_FLAG_DOWN) != 0;
+                bool tipDown = !isUp && !isCanceled && (isInContact || isDown);
+
+                // Ignore pure hover events for untracked pointers
+                if (!tipDown && !isUp && !isCanceled)
+                {
+                    int hoverExisting = FindOrAllocateSlot(pid, allowAllocate: false);
+                    if (hoverExisting < 0)
                     {
-                        touchDownCount++;
+                        continue;
+                    }
+                }
+
+                int slotIndex = FindOrAllocateSlot(pid, allowAllocate: tipDown);
+                if (slotIndex < 0)
+                {
+                    continue;
+                }
+
+                seenSlots[slotIndex] = true;
+                ref var slot = ref _slots[slotIndex];
+                slot.SourceDevice = info.pointerInfo.sourceDevice;
+                slot.TipSwitch = tipDown;
+                slot.Confidence = !isCanceled;
+
+                if (!isCanceled)
+                {
+                    POINT pt = info.pointerInfo.ptPixelLocation;
+                    ScreenToClient(normHwnd, ref pt);
+                    NormalizeCoordinates(pt, width, height, maxX, maxY, out slot.X, out slot.Y);
+                }
+
+                if (!tipDown)
+                {
+                    releaseAfterSend[slotIndex] = true;
+                }
+            }
+
+            // Reconcile any previously active slot on the same digitizer absent from a full hardware frame
+            if (fromFullFrame && frameSourceDevice != IntPtr.Zero)
+            {
+                for (int s = 0; s < HvProtocolConstants.MaxTouchContacts; s++)
+                {
+                    if (_slots[s].Occupied && !seenSlots[s] && _slots[s].SourceDevice == frameSourceDevice)
+                    {
+                        _slots[s].TipSwitch = false;
+                        _slots[s].Confidence = true;
+                        releaseAfterSend[s] = true;
                     }
                 }
             }
 
-            report.ContactCount = reportCount;
-            Volatile.Write(ref _activeTouchCount, touchDownCount);
+            PackAndReleaseSlots(ref report, releaseAfterSend);
+            shouldSend = report.ContactCount > 0;
+        }
 
-            // If this contact just lifted (WM_POINTERUP), release its slot AFTER including
-            // the final TipSwitch=0 report so Windows 11 registers the finger lift cleanly.
-            if (!isTipDown)
+        if (shouldSend)
+        {
+            _touchTransport.SendStruct(HvPacketType.TouchFrame, in report);
+        }
+    }
+
+    private void PackAndReleaseSlots(ref HvTouchInputReport report, ReadOnlySpan<bool> releaseAfterSend)
+    {
+        byte reportCount = 0;
+        int touchDownCount = 0;
+
+        for (int i = 0; i < HvProtocolConstants.MaxTouchContacts; i++)
+        {
+            if (_slots[i].Occupied)
             {
-                slot = default;
+                var contact = HvTouchContact.Create(
+                    _slots[i].ContactId,
+                    _slots[i].X,
+                    _slots[i].Y,
+                    _slots[i].TipSwitch,
+                    _slots[i].Confidence
+                );
+                report.SetContact(reportCount, in contact);
+                reportCount++;
+
+                if (_slots[i].TipSwitch)
+                {
+                    touchDownCount++;
+                }
+
+                if (releaseAfterSend[i])
+                {
+                    _slots[i] = default;
+                }
             }
         }
 
-        _touchTransport.SendStruct(HvPacketType.TouchFrame, in report);
+        report.ContactCount = reportCount;
+        Volatile.Write(ref _activeTouchCount, touchDownCount);
+    }
+
+    private static void NormalizeCoordinates(
+        POINT pt,
+        int width,
+        int height,
+        int maxX,
+        int maxY,
+        out ushort normX,
+        out ushort normY)
+    {
+        int clampedX = Math.Clamp(pt.X, 0, maxX);
+        int clampedY = Math.Clamp(pt.Y, 0, maxY);
+
+        if (width >= 64)
+        {
+            if (clampedX <= EdgeSnapThresholdPx) clampedX = 0;
+            else if (clampedX >= maxX - EdgeSnapThresholdPx) clampedX = maxX;
+        }
+
+        if (height >= 64)
+        {
+            if (clampedY <= EdgeSnapThresholdPx) clampedY = 0;
+            else if (clampedY >= maxY - EdgeSnapThresholdPx) clampedY = maxY;
+        }
+
+        normX = (ushort)((clampedX * (long)HvProtocolConstants.TouchCoordinateMax) / maxX);
+        normY = (ushort)((clampedY * (long)HvProtocolConstants.TouchCoordinateMax) / maxY);
+    }
+
+    private ushort ComputeScanTime()
+    {
+        // Scan Time in 100 microsecond (0.1 ms) units without Int64 multiplication overflow
+        long ticks100Us = Stopwatch.GetElapsedTime(_qpcOrigin).Ticks / 1000L;
+        return (ushort)(ticks100Us & 0xFFFF);
     }
 
     private int FindOrAllocateSlot(uint pointerId, bool allowAllocate)
@@ -565,6 +1054,7 @@ public sealed class TouchWindowInterceptor : IDisposable
                 _slots[i].Occupied = true;
                 _slots[i].Win32PointerId = pointerId;
                 _slots[i].ContactId = (byte)i;
+                _slots[i].Confidence = true;
                 return i;
             }
         }
@@ -577,14 +1067,51 @@ public sealed class TouchWindowInterceptor : IDisposable
         if (_disposed) return;
         _disposed = true;
 
-        foreach (IntPtr hwnd in _subclassedHwnds)
+        List<IntPtr> hwndsSnapshot;
+        lock (_stateLock)
         {
-            try
-            {
-                RemoveWindowSubclass(hwnd, _subclassDelegate, SubclassId);
-            }
-            catch { }
+            hwndsSnapshot = new List<IntPtr>(_subclassedHwnds);
         }
-        _subclassedHwnds.Clear();
+
+        uint currentTid = GetCurrentThreadId();
+
+        foreach (IntPtr hwnd in hwndsSnapshot)
+        {
+            if (!IsWindow(hwnd))
+            {
+                lock (_stateLock) { _subclassedHwnds.Remove(hwnd); }
+                continue;
+            }
+
+            uint ownerTid = GetWindowThreadProcessId(hwnd, out _);
+            if (ownerTid == 0 || ownerTid == currentTid)
+            {
+                ExecuteDetachOnOwningThread(hwnd);
+            }
+            else
+            {
+                bool hasHook;
+                lock (_stateLock) { hasHook = _threadHooks.ContainsKey(ownerTid); }
+                if (hasHook)
+                {
+                    DispatchRemoteThreadOp(hwnd, ownerTid, string.Empty, PendingOpKind.Detach, timeoutMs: 150);
+                }
+            }
+        }
+
+        List<IntPtr> hooksToRemove;
+        lock (_stateLock)
+        {
+            hooksToRemove = new List<IntPtr>(_threadHooks.Values);
+            _threadHooks.Clear();
+            _pendingOpsByThread.Clear();
+            Interlocked.Exchange(ref _pendingOpCount, 0);
+            _subclassedHwnds.Clear();
+        }
+
+        foreach (IntPtr hHook in hooksToRemove)
+        {
+            try { UnhookWindowsHookEx(hHook); } catch { }
+        }
     }
 }

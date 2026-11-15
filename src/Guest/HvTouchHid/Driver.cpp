@@ -331,8 +331,12 @@ HvTouchSubmitInputReport(
         sanitized.ContactCount = HV_MAX_TOUCH_CONTACTS;
     }
 
-    // Clamp coordinates to [0..32767] and enforce Confidence=1 for active contacts
+    // Sanitize active/lifting contacts up to ContactCount and zero trailing unused slots
     for (UCHAR i = 0; i < HV_MAX_TOUCH_CONTACTS; ++i) {
+        if (i >= sanitized.ContactCount) {
+            RtlZeroMemory(&sanitized.Contacts[i], sizeof(HV_TOUCH_CONTACT));
+            continue;
+        }
         if (sanitized.Contacts[i].X > HV_TOUCH_COORDINATE_MAX) {
             sanitized.Contacts[i].X = HV_TOUCH_COORDINATE_MAX;
         }

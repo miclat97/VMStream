@@ -5,10 +5,50 @@
 #pragma once
 
 #include <portcls.h>
+#define _NEW_DELETE_OPERATORS_
 #include <stdunk.h>
 #include <ksdebug.h>
 #include <ntintsafe.h>
 #include <ntstrsafe.h>
+
+inline PVOID operator new(size_t iSize, POOL_TYPE poolType) noexcept
+{
+    PVOID result = ExAllocatePoolWithTag(poolType, iSize, 'wNcP');
+    if (result != NULL) {
+        RtlZeroMemory(result, iSize);
+    }
+    return result;
+}
+
+inline PVOID operator new(size_t iSize, POOL_TYPE poolType, ULONG tag) noexcept
+{
+    PVOID result = ExAllocatePoolWithTag(poolType, iSize, tag);
+    if (result != NULL) {
+        RtlZeroMemory(result, iSize);
+    }
+    return result;
+}
+
+inline void __cdecl operator delete(PVOID pVoid) noexcept
+{
+    if (pVoid != NULL) {
+        ExFreePool(pVoid);
+    }
+}
+
+inline void __cdecl operator delete(PVOID pVoid, ULONG tag) noexcept
+{
+    if (pVoid != NULL) {
+        ExFreePoolWithTag(pVoid, tag);
+    }
+}
+
+inline void __cdecl operator delete(PVOID pVoid, size_t /*cbSize*/) noexcept
+{
+    if (pVoid != NULL) {
+        ExFreePool(pVoid);
+    }
+}
 
 #include "../../Shared/HvProtocol.h"
 

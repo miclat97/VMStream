@@ -220,7 +220,6 @@ static PCFILTER_DESCRIPTOR g_RenderWaveFilterDescriptor = {
     sizeof(PCNODE_DESCRIPTOR),
     SIZEOF_ARRAY(g_WaveNodes),
     g_WaveNodes,
-    sizeof(PCCONNECTION_DESCRIPTOR),
     SIZEOF_ARRAY(g_RenderWaveConnections),
     g_RenderWaveConnections,
     SIZEOF_ARRAY(g_RenderWaveCategories),
@@ -236,7 +235,6 @@ static PCFILTER_DESCRIPTOR g_CaptureWaveFilterDescriptor = {
     sizeof(PCNODE_DESCRIPTOR),
     SIZEOF_ARRAY(g_CaptureWaveNodes),
     g_CaptureWaveNodes,
-    sizeof(PCCONNECTION_DESCRIPTOR),
     SIZEOF_ARRAY(g_CaptureWaveConnections),
     g_CaptureWaveConnections,
     SIZEOF_ARRAY(g_CaptureWaveCategories),
@@ -385,8 +383,8 @@ CMiniportWaveRTHvAudio::DataRangeIntersection(
 {
     UNREFERENCED_PARAMETER(PinId);
 
-    if (!IsEqualGUIDAligned(ClientDataRange->FormatType, KSDATAFORMAT_TYPE_AUDIO) &&
-        !IsEqualGUIDAligned(ClientDataRange->FormatType, KSDATAFORMAT_TYPE_WILDCARD))
+    if (!IsEqualGUIDAligned(ClientDataRange->MajorFormat, KSDATAFORMAT_TYPE_AUDIO) &&
+        !IsEqualGUIDAligned(ClientDataRange->MajorFormat, KSDATAFORMAT_TYPE_WILDCARD))
     {
         return STATUS_NO_MATCH;
     }

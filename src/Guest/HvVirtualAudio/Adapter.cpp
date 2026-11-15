@@ -49,26 +49,6 @@ public:
         Cleanup();
     }
 
-    STDMETHODIMP NonDelegatingQueryInterface(
-        _In_ REFIID Interface,
-        _COM_Outptr_ PVOID* Object
-    ) override
-    {
-        if (IsEqualGUIDAligned(Interface, IID_IUnknown)) {
-            *Object = reinterpret_cast<PVOID>(static_cast<PUNKNOWN>(static_cast<IHvAudioAdapterCommon*>(this)));
-        } else if (IsEqualGUIDAligned(Interface, IID_IHvAudioAdapterCommon)) {
-            *Object = reinterpret_cast<PVOID>(static_cast<PHVAUDIOADAPTERCOMMON>(this));
-        } else if (IsEqualGUIDAligned(Interface, IID_IAdapterPowerManagement)) {
-            *Object = reinterpret_cast<PVOID>(static_cast<PADAPTERPOWERMANAGEMENT>(this));
-        } else {
-            *Object = NULL;
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        reinterpret_cast<PUNKNOWN>(*Object)->AddRef();
-        return STATUS_SUCCESS;
-    }
-
     // IHvAudioAdapterCommon implementation
     STDMETHODIMP_(NTSTATUS) Init(_In_ PDEVICE_OBJECT DeviceObject) override {
         m_DeviceObject = DeviceObject;
@@ -332,6 +312,27 @@ private:
     LIST_ENTRY         m_PendingIrpList;
 };
 
+STDMETHODIMP
+CAdapterCommon::NonDelegatingQueryInterface(
+    _In_ REFIID Interface,
+    _COM_Outptr_ PVOID* Object
+)
+{
+    if (IsEqualGUIDAligned(Interface, IID_IUnknown)) {
+        *Object = reinterpret_cast<PVOID>(static_cast<PUNKNOWN>(static_cast<IHvAudioAdapterCommon*>(this)));
+    } else if (IsEqualGUIDAligned(Interface, IID_IHvAudioAdapterCommon)) {
+        *Object = reinterpret_cast<PVOID>(static_cast<PHVAUDIOADAPTERCOMMON>(this));
+    } else if (IsEqualGUIDAligned(Interface, IID_IAdapterPowerManagement)) {
+        *Object = reinterpret_cast<PVOID>(static_cast<PADAPTERPOWERMANAGEMENT>(this));
+    } else {
+        *Object = NULL;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    reinterpret_cast<PUNKNOWN>(*Object)->AddRef();
+    return STATUS_SUCCESS;
+}
+
 // ============================================================================
 // Sideband Control Device Dispatch Routines (\\.\HvVirtualAudio)
 // ============================================================================
@@ -470,7 +471,7 @@ static NTSTATUS
 InstallSubdevice(
     _In_  PDEVICE_OBJECT       DeviceObject,
     _In_  PIRP                 Irp,
-    _In_  PWSTR                Name,
+    _In_  PCWSTR               Name,
     _In_  REFGUID              PortClassId,
     _In_  PUNKNOWN             AdapterCommon,
     _In_  HV_AUDIO_DEVICE_TYPE DeviceType,
@@ -512,7 +513,7 @@ InstallSubdevice(
 
     status = port->Init(DeviceObject, Irp, miniport, AdapterCommon, NULL);
     if (NT_SUCCESS(status)) {
-        status = PcRegisterSubdevice(DeviceObject, Name, port);
+        status = PcRegisterSubdevice(DeviceObject, const_cast<PWSTR>(Name), port);
         if (NT_SUCCESS(status) && OutUnknownPort != NULL) {
             port->QueryInterface(IID_IUnknown, reinterpret_cast<PVOID*>(OutUnknownPort));
         }

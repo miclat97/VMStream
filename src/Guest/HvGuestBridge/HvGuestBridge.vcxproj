@@ -81,6 +81,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Shared\HvProtocol.h" />
+    <ClInclude Include="..\..\Shared\VmStreamVersion.h" />
     <ClInclude Include="HvTransport.h" />
     <ClInclude Include="TouchBridgeWorker.h" />
     <ClInclude Include="AudioBridgeWorker.h" />
@@ -90,6 +91,9 @@
     <ClCompile Include="TouchBridgeWorker.cpp" />
     <ClCompile Include="AudioBridgeWorker.cpp" />
     <ClCompile Include="ServiceMain.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="HvGuestBridge.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

@@ -66,6 +66,64 @@ if (-not $SkipPrerequisites -and (Test-Path $PrereqScript)) {
     }
 }
 
+function Find-RcExe {
+    param(
+        [string]$KitsRoot,
+        [string]$SdkVersion
+    )
+    $candidates = @()
+    if ($KitsRoot -and $SdkVersion) {
+        $candidates += (Join-Path $KitsRoot "bin\$SdkVersion\x64\rc.exe")
+    }
+    if ($KitsRoot) {
+        $candidates += (Join-Path $KitsRoot "bin\x64\rc.exe")
+        $binRoot = Join-Path $KitsRoot "bin"
+        if (Test-Path $binRoot) {
+            Get-ChildItem -Path $binRoot -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { $candidates += (Join-Path $_.FullName "x64\rc.exe") }
+        }
+    }
+    $sysBinRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+    if (Test-Path $sysBinRoot) {
+        Get-ChildItem -Path $sysBinRoot -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { $candidates += (Join-Path $_.FullName "x64\rc.exe") }
+    }
+    $rcCmd = Get-Command rc.exe -ErrorAction SilentlyContinue
+    if ($rcCmd) { $candidates += $rcCmd.Source }
+
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+    return $null
+}
+
+function Invoke-CompileResource {
+    param(
+        [string]$RcExe,
+        [string]$RcFile,
+        [string]$OutRes,
+        [string]$SharedIncludeDir,
+        [string]$BuildConfig
+    )
+    if (-not $RcExe -or -not (Test-Path $RcFile)) { return $null }
+    $rcArgs = @("/nologo", "/I", $SharedIncludeDir, "/fo", $OutRes)
+    if ($BuildConfig -eq "Debug") {
+        $rcArgs += "/d"
+        $rcArgs += "_DEBUG"
+    }
+    $rcArgs += $RcFile
+    & $RcExe @rcArgs
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $OutRes)) {
+        return $OutRes
+    }
+    Write-Warning "rc.exe failed for $RcFile (exit code $LASTEXITCODE); continuing without embedded VERSIONINFO."
+    return $null
+}
+
+$RcExe = Find-RcExe -KitsRoot $Toolchain.KitsRoot -SdkVersion $Toolchain.SdkVersion
+
 Write-Host "`n======================================================================" -ForegroundColor Cyan
 Write-Host " VMStream Build Pipeline - Configuration: $Configuration (x64)"           -ForegroundColor Cyan
 Write-Host "======================================================================" -ForegroundColor Cyan
@@ -129,6 +187,13 @@ if (-not $BridgeBuilt -and $Toolchain.ClExe -and $Toolchain.SdkVersion) {
     $ShdDir  = Join-Path $RepoRoot "src\Shared"
     $OutExe  = Join-Path $BridgeBinDir "HvGuestBridge.exe"
 
+    $BridgeRes = Invoke-CompileResource `
+        -RcExe $RcExe `
+        -RcFile (Join-Path $SrcDir "HvGuestBridge.rc") `
+        -OutRes (Join-Path $BridgeObjDir "HvGuestBridge.res") `
+        -SharedIncludeDir $ShdDir `
+        -BuildConfig $Configuration
+
     $RspFile = Join-Path $BridgeObjDir "compile_bridge.rsp"
     [string[]]$RspContent = @(
         "/nologo"
@@ -167,6 +232,7 @@ if (-not $BridgeBuilt -and $Toolchain.ClExe -and $Toolchain.SdkVersion) {
         "winmm.lib"
         "kernel32.lib"
     )
+    if ($BridgeRes) { $RspContent += "`"$BridgeRes`"" }
     [System.IO.File]::WriteAllLines($RspFile, $RspContent)
 
     & $Toolchain.ClExe "@$RspFile"
@@ -236,6 +302,13 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
 
         & $Toolchain.ClExe "@$ClTouchRsp"
         if ($LASTEXITCODE -eq 0) {
+            $TouchRes = Invoke-CompileResource `
+                -RcExe $RcExe `
+                -RcFile (Join-Path $TouchSrcDir "HvTouchHid.rc") `
+                -OutRes (Join-Path $TouchObjDir "HvTouchHid.res") `
+                -SharedIncludeDir $ShdDir `
+                -BuildConfig $Configuration
+
             $LinkTouchRsp = Join-Path $TouchObjDir "link_touch.rsp"
             [string[]]$LinkTouchLines = @(
                 "/NOLOGO", "/DRIVER", "/SUBSYSTEM:NATIVE", "/NODEFAULTLIB", "/INCREMENTAL:NO",
@@ -249,6 +322,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
                 "ntoskrnl.lib", "hal.lib", "wmilib.lib", "BufferOverflowFastFailK.lib",
                 "WdfLdr.lib", "WdfDriverEntry.lib", "vhfkm.lib", "wdmsec.lib"
             )
+            if ($TouchRes) { $LinkTouchLines += "`"$TouchRes`"" }
             [System.IO.File]::WriteAllLines($LinkTouchRsp, $LinkTouchLines)
             & $Toolchain.LinkExe "@$LinkTouchRsp"
             if ($LASTEXITCODE -eq 0 -and (Test-Path $TouchSys)) {
@@ -309,6 +383,13 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
 
         & $Toolchain.ClExe "@$ClAudioRsp"
         if ($LASTEXITCODE -eq 0) {
+            $AudioRes = Invoke-CompileResource `
+                -RcExe $RcExe `
+                -RcFile (Join-Path $AudioSrcDir "HvVirtualAudio.rc") `
+                -OutRes (Join-Path $AudioObjDir "HvVirtualAudio.res") `
+                -SharedIncludeDir $ShdDir `
+                -BuildConfig $Configuration
+
             $LinkAudioRsp = Join-Path $AudioObjDir "link_audio.rsp"
             [string[]]$LinkAudioLines = @(
                 "/NOLOGO", "/DRIVER:WDM", "/SUBSYSTEM:NATIVE", "/NODEFAULTLIB", "/INCREMENTAL:NO",
@@ -323,6 +404,7 @@ if (-not $SkipWdkDrivers -and $Toolchain.WdkKmInc -and $Toolchain.WdkKmLib) {
                 "ntoskrnl.lib", "hal.lib", "wmilib.lib", "BufferOverflowFastFailK.lib",
                 "portcls.lib", "stdunk.lib", "ksguid.lib", "wdmsec.lib"
             )
+            if ($AudioRes) { $LinkAudioLines += "`"$AudioRes`"" }
             [System.IO.File]::WriteAllLines($LinkAudioRsp, $LinkAudioLines)
             & $Toolchain.LinkExe "@$LinkAudioRsp"
             if ($LASTEXITCODE -eq 0 -and (Test-Path $AudioSys)) {

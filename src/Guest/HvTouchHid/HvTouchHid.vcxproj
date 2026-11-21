@@ -92,11 +92,15 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Shared\HvProtocol.h" />
+    <ClInclude Include="..\..\Shared\VmStreamVersion.h" />
     <ClInclude Include="HvTouchDescriptor.h" />
     <ClInclude Include="Driver.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Driver.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="HvTouchHid.rc" />
   </ItemGroup>
   <ItemGroup>
     <Inf Include="HvTouchHid.inf" />

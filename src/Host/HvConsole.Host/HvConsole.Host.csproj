@@ -12,6 +12,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <RootNamespace>HvConsole.Host</RootNamespace>
     <AssemblyName>HvConsole.Host</AssemblyName>
     <Version>1.2.0.0</Version>

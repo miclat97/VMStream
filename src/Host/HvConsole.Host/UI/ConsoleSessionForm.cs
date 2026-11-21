@@ -114,7 +114,7 @@ public sealed class ConsoleSessionForm : Form
     private readonly System.Windows.Forms.Timer _hookReassertTimer;
 
     private bool _isBorderlessFullscreen;
-    private ZoomLevel? _preFullscreenZoomLevel;
+    private ZoomLevel _windowedZoomPreference;
     private bool _edgeGesturePropSet;
     private bool _isClosing;
     private FormWindowState _savedWindowState = FormWindowState.Normal;
@@ -131,6 +131,7 @@ public sealed class ConsoleSessionForm : Form
     {
         _vmInfo = vmInfo;
         _startInFullscreen = startInFullscreen;
+        _windowedZoomPreference = ConsoleZoomSettings.LoadSavedPreference();
         _deviceSettings = (deviceSettings ?? DeviceRedirectionSettings.Load()).Clone();
 
         string initialMicTag = _deviceSettings.EnableMicrophone ? "Mic: OFF (Locked)" : "Mic: Disabled";
@@ -180,6 +181,11 @@ public sealed class ConsoleSessionForm : Form
             _deviceSettings
         );
 
+        _hudForm.GetWindowedZoomPreferenceCallback = () => _windowedZoomPreference;
+        _hudForm.IsFullscreenCallback = () => _isBorderlessFullscreen;
+        _hudForm.GetDisplayStatsCallback = FormatDisplayStatsForHud;
+        _hudForm.RequestZoomLevelChanged += level => BeginInvoke(() => SetWindowedZoomPreference(level));
+        _hudForm.RequestShowRdpDiagnostics += () => BeginInvoke(() => _rdpControl.TryShowSessionDiagnostics());
         _hudForm.RequestToggleFullscreen += () => BeginInvoke(ToggleBorderlessFullscreen);
         _hudForm.RequestDisconnect += () => BeginInvoke(Close);
         _hudForm.RequestToggleMicrophone += () => BeginInvoke(ToggleMicrophoneWithFeedback);
@@ -388,9 +394,9 @@ public sealed class ConsoleSessionForm : Form
         base.OnDpiChanged(e);
         if (IsDisposed || _isClosing) return;
 
-        if (!_isBorderlessFullscreen && _rdpControl.IsConnected)
+        if (!_isBorderlessFullscreen && _rdpControl.IsConnected && _windowedZoomPreference == ZoomLevel.Auto)
         {
-            _rdpControl.SetZoomLevel(ZoomLevel.Auto, _rdpViewportPanel.ClientSize, isFullScreen: false);
+            _rdpControl.SetZoomLevel(ZoomLevel.Auto, _rdpViewportPanel.ClientSize, isFullScreen: false, force: true);
         }
         else
         {
@@ -515,12 +521,12 @@ public sealed class ConsoleSessionForm : Form
             _rdpControl.Visible = true;
             if (_isBorderlessFullscreen)
             {
-                _rdpControl.SetZoomLevel(ZoomLevel.P100, _rdpViewportPanel.ClientSize, isFullScreen: true);
+                _rdpControl.SetZoomLevel(ZoomLevel.P100, _rdpViewportPanel.ClientSize, isFullScreen: true, force: true);
                 _rdpControl.SyncFullScreenState(true);
             }
             else
             {
-                _rdpControl.SetZoomLevel(ZoomLevel.Auto, _rdpViewportPanel.ClientSize, isFullScreen: false);
+                _rdpControl.SetZoomLevel(_windowedZoomPreference, _rdpViewportPanel.ClientSize, isFullScreen: false, force: true);
             }
 
             if (!_hudForm.Visible)
@@ -550,11 +556,11 @@ public sealed class ConsoleSessionForm : Form
         }
         if (IsDisposed || _isClosing || !_rdpControl.IsConnected || !_rdpControl.HasActiveVideo) return;
 
-        ZoomLevel desired = _isBorderlessFullscreen ? ZoomLevel.P100 : ZoomLevel.Auto;
+        ZoomLevel desired = _isBorderlessFullscreen ? ZoomLevel.P100 : _windowedZoomPreference;
         ZoomLevel resolved = desired == ZoomLevel.Auto ? _rdpControl.ComputeAutoZoomLevel() : desired;
         if (_rdpControl.CurrentZoomLevel != resolved)
         {
-            _rdpControl.SetZoomLevel(desired, _rdpViewportPanel.ClientSize, _isBorderlessFullscreen);
+            _rdpControl.SetZoomLevel(desired, _rdpViewportPanel.ClientSize, _isBorderlessFullscreen, force: true);
         }
     }
 
@@ -654,7 +660,6 @@ public sealed class ConsoleSessionForm : Form
                 _savedWindowState = WindowState;
                 _savedBorderStyle = FormBorderStyle;
                 _savedWindowBounds = WindowState == FormWindowState.Maximized ? RestoreBounds : Bounds;
-                _preFullscreenZoomLevel ??= (_rdpControl.IsConnected ? _rdpControl.CurrentZoomLevel : ZoomLevel.Auto);
 
                 if (WindowState == FormWindowState.Maximized)
                 {
@@ -670,7 +675,10 @@ public sealed class ConsoleSessionForm : Form
             else
             {
                 _isBorderlessFullscreen = false;
-                _rdpControl.SyncFullScreenState(false);
+                if (_rdpControl.IsConnected)
+                {
+                    _rdpControl.SyncFullScreenState(false);
+                }
 
                 FormBorderStyle = _savedBorderStyle;
                 Bounds = _savedWindowBounds;
@@ -688,8 +696,11 @@ public sealed class ConsoleSessionForm : Form
 
         if (enableFullscreen)
         {
-            _rdpControl.SetZoomLevel(ZoomLevel.P100, _rdpViewportPanel.ClientSize, isFullScreen: true);
-            _rdpControl.SyncFullScreenState(true);
+            _rdpControl.SetZoomLevel(ZoomLevel.P100, _rdpViewportPanel.ClientSize, isFullScreen: true, force: true);
+            if (_rdpControl.IsConnected)
+            {
+                _rdpControl.SyncFullScreenState(true);
+            }
 
             _toastForm.ShowToast(
                 this,
@@ -701,9 +712,7 @@ public sealed class ConsoleSessionForm : Form
         }
         else
         {
-            ZoomLevel restoreZoom = _preFullscreenZoomLevel ?? ZoomLevel.Auto;
-            _rdpControl.SetZoomLevel(restoreZoom, _rdpViewportPanel.ClientSize, isFullScreen: false);
-            _preFullscreenZoomLevel = null;
+            _rdpControl.SetZoomLevel(_windowedZoomPreference, _rdpViewportPanel.ClientSize, isFullScreen: false, force: true);
 
             _toastForm.ShowToast(
                 this,
@@ -718,6 +727,47 @@ public sealed class ConsoleSessionForm : Form
         _rdpControl.CaptureKeyboardFocus();
         ScheduleKeyboardHookBringToFront();
         Update();
+    }
+
+    public void SetWindowedZoomPreference(ZoomLevel preference)
+    {
+        if (IsDisposed || _isClosing) return;
+
+        _windowedZoomPreference = preference;
+        ConsoleZoomSettings.SavePreference(preference);
+
+        if (!_isBorderlessFullscreen && _rdpControl.IsConnected)
+        {
+            _rdpControl.SetZoomLevel(_windowedZoomPreference, _rdpViewportPanel.ClientSize, isFullScreen: false, force: true);
+        }
+    }
+
+    private string FormatDisplayStatsForHud()
+    {
+        int hostDpiPct = (int)Math.Round(((DeviceDpi > 0 ? DeviceDpi : 96) / 96.0) * 100.0);
+        string fbrState = _rdpControl.IsFrameBufferRedirectionActive switch
+        {
+            true  => "ON",
+            false => "OFF",
+            null  => "N/A"
+        };
+
+        if (!_rdpControl.IsConnected)
+        {
+            return $"Connecting... | FBR:{fbrState} | Host DPI:{hostDpiPct}%";
+        }
+
+        return string.Format(
+            CultureInfo.InvariantCulture,
+            "{0}x{1} @ {2}% -> {3}x{4}px | FBR:{5} | Host DPI:{6}%",
+            _rdpControl.RemoteDesktopWidth,
+            _rdpControl.RemoteDesktopHeight,
+            (uint)_rdpControl.CurrentZoomLevel,
+            _rdpControl.Width,
+            _rdpControl.Height,
+            fbrState,
+            hostDpiPct
+        );
     }
 
     // ========================================================================

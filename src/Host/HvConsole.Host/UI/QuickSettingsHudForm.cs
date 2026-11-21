@@ -11,6 +11,7 @@ using System.Windows.Forms;
 using HvConsole.Host.Audio;
 using HvConsole.Host.Input;
 using HvConsole.Host.Protocol;
+using HvConsole.Host.Rdp;
 using HvConsole.Host.Transport;
 using HvConsole.Host.Wmi;
 
@@ -18,6 +19,16 @@ namespace HvConsole.Host.UI;
 
 public sealed class QuickSettingsHudForm : Form
 {
+    private static readonly ZoomLevel[] ZoomOptions =
+    {
+        ZoomLevel.P100,
+        ZoomLevel.Auto,
+        ZoomLevel.P75,
+        ZoomLevel.P125,
+        ZoomLevel.P150,
+        ZoomLevel.P200
+    };
+
     private readonly HyperVVmInfo _vmInfo;
     private readonly IHvTransport _audioTransport;
     private readonly IHvTransport _touchTransport;
@@ -38,15 +49,24 @@ public sealed class QuickSettingsHudForm : Form
     private readonly CheckBox _chkGateKsState;
     private readonly CheckBox _chkTouchscreenRedir;
     private readonly CheckBox _chkTouchpadHScrollRedir;
+    private readonly ComboBox _cmbZoomLevel;
+    private readonly Button _btnRdpDiagnostics;
+    private readonly Label _lblDisplayStats;
     private readonly Button _btnToggleFullscreen;
     private readonly Button _btnDisconnect;
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private bool _suppressEvents;
 
+    public Func<ZoomLevel>? GetWindowedZoomPreferenceCallback { get; set; }
+    public Func<bool>? IsFullscreenCallback { get; set; }
+    public Func<string>? GetDisplayStatsCallback { get; set; }
+
     public event Action? RequestToggleFullscreen;
     public event Action? RequestDisconnect;
     public event Action? RequestToggleMicrophone;
     public event Action? RequestTouchConfigurationRefresh;
+    public event Action<ZoomLevel>? RequestZoomLevelChanged;
+    public event Action? RequestShowRdpDiagnostics;
 
     public QuickSettingsHudForm(
         HyperVVmInfo vmInfo,
@@ -71,7 +91,7 @@ public sealed class QuickSettingsHudForm : Form
         DoubleBuffered = true;
         BackColor = Color.FromArgb(15, 23, 42);
         ForeColor = Color.FromArgb(241, 245, 249);
-        Size = new Size(460, 534);
+        Size = new Size(460, 612);
         Opacity = 0.97;
 
         var headerFont = new Font("Segoe UI Semibold", 12f, FontStyle.Bold);
@@ -305,6 +325,76 @@ public sealed class QuickSettingsHudForm : Form
             UpdateUiState();
         };
 
+        // --- Display & Scaling Section ---
+        var lblDisplayTitle = new Label
+        {
+            Text = "DISPLAY & SCALING (Basic Console 1:1 Native)",
+            Font = sectionFont,
+            ForeColor = Color.FromArgb(203, 213, 225),
+            Location = new Point(20, 438),
+            Size = new Size(420, 20)
+        };
+
+        var lblZoomLabel = new Label
+        {
+            Text = "Windowed Zoom:",
+            Font = bodyFont,
+            ForeColor = Color.FromArgb(148, 163, 184),
+            Location = new Point(20, 466),
+            Size = new Size(116, 22)
+        };
+
+        _cmbZoomLevel = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            FlatStyle = FlatStyle.Flat,
+            Font = bodyFont,
+            BackColor = Color.FromArgb(30, 41, 59),
+            ForeColor = Color.FromArgb(241, 245, 249),
+            Location = new Point(138, 462),
+            Size = new Size(200, 26)
+        };
+        foreach (ZoomLevel opt in ZoomOptions)
+        {
+            _cmbZoomLevel.Items.Add(ConsoleZoomSettings.FormatDisplay(opt));
+        }
+        _cmbZoomLevel.SelectedIndex = 0;
+        _cmbZoomLevel.SelectedIndexChanged += (_, _) =>
+        {
+            if (_suppressEvents) return;
+            int idx = _cmbZoomLevel.SelectedIndex;
+            if (idx >= 0 && idx < ZoomOptions.Length)
+            {
+                RequestZoomLevelChanged?.Invoke(ZoomOptions[idx]);
+                UpdateUiState();
+            }
+        };
+
+        _btnRdpDiagnostics = new Button
+        {
+            Text = "RDP Stats",
+            Font = bodyFont,
+            FlatStyle = FlatStyle.Flat,
+            BackColor = Color.FromArgb(30, 41, 59),
+            ForeColor = Color.FromArgb(203, 213, 225),
+            Location = new Point(346, 461),
+            Size = new Size(94, 28)
+        };
+        _btnRdpDiagnostics.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
+        _btnRdpDiagnostics.Click += (_, _) =>
+        {
+            Hide();
+            RequestShowRdpDiagnostics?.Invoke();
+        };
+
+        _lblDisplayStats = new Label
+        {
+            Font = monoFont,
+            ForeColor = Color.FromArgb(148, 163, 184),
+            Location = new Point(20, 495),
+            Size = new Size(420, 20)
+        };
+
         // --- Bottom Action Bar ---
         _btnToggleFullscreen = new Button
         {
@@ -313,7 +403,7 @@ public sealed class QuickSettingsHudForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(30, 41, 59),
             ForeColor = Color.FromArgb(241, 245, 249),
-            Location = new Point(20, 444),
+            Location = new Point(20, 526),
             Size = new Size(280, 38)
         };
         _btnToggleFullscreen.FlatAppearance.BorderColor = Color.FromArgb(71, 85, 105);
@@ -330,7 +420,7 @@ public sealed class QuickSettingsHudForm : Form
             FlatStyle = FlatStyle.Flat,
             BackColor = Color.FromArgb(127, 29, 29),
             ForeColor = Color.White,
-            Location = new Point(312, 444),
+            Location = new Point(312, 526),
             Size = new Size(128, 38)
         };
         _btnDisconnect.FlatAppearance.BorderColor = Color.FromArgb(185, 28, 28);
@@ -342,7 +432,7 @@ public sealed class QuickSettingsHudForm : Form
             Font = new Font("Segoe UI", 8.0f),
             ForeColor = Color.FromArgb(100, 116, 139),
             TextAlign = ContentAlignment.MiddleCenter,
-            Location = new Point(20, 496),
+            Location = new Point(20, 576),
             Size = new Size(420, 18)
         };
 
@@ -365,6 +455,11 @@ public sealed class QuickSettingsHudForm : Form
             lblInputTitle,
             _chkTouchscreenRedir,
             _chkTouchpadHScrollRedir,
+            lblDisplayTitle,
+            lblZoomLabel,
+            _cmbZoomLevel,
+            _btnRdpDiagnostics,
+            _lblDisplayStats,
             _btnToggleFullscreen,
             _btnDisconnect,
             lblFooterHint
@@ -505,11 +600,26 @@ public sealed class QuickSettingsHudForm : Form
             {
                 _chkTouchpadHScrollRedir.Checked = _touchInterceptor.TouchpadHorizontalScrollEnabled;
             }
+
+            bool isFullscreen = IsFullscreenCallback?.Invoke() ?? false;
+            _cmbZoomLevel.Enabled = !isFullscreen;
+            if (!_cmbZoomLevel.DroppedDown && GetWindowedZoomPreferenceCallback != null)
+            {
+                ZoomLevel pref = GetWindowedZoomPreferenceCallback();
+                int desiredZoomIdx = Array.IndexOf(ZoomOptions, pref);
+                if (desiredZoomIdx < 0) desiredZoomIdx = 0;
+                if (_cmbZoomLevel.SelectedIndex != desiredZoomIdx)
+                {
+                    _cmbZoomLevel.SelectedIndex = desiredZoomIdx;
+                }
+            }
         }
         finally
         {
             _suppressEvents = false;
         }
+
+        _lblDisplayStats.Text = GetDisplayStatsCallback?.Invoke() ?? string.Empty;
 
         // Microphone Privacy Button State
         if (!_deviceSettings.EnableMicrophone)

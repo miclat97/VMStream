@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -32,6 +33,92 @@ public enum ZoomLevel : uint
     P125 = 125U,
     P150 = 150U,
     P200 = 200U
+}
+
+/// <summary>
+/// Persists the user's preferred windowed-mode console zoom level.
+/// Defaults to ZoomLevel.P100 (1:1 native physical pixels) so hosts with 125%/150% DPI scaling
+/// never double-scale a guest VM that already has its own Windows DPI scaling enabled.
+/// </summary>
+public static class ConsoleZoomSettings
+{
+    private static readonly string SettingsDirPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "VMStream"
+    );
+
+    private static readonly string ZoomFilePath = Path.Combine(SettingsDirPath, "zoom_level.txt");
+
+    public static ZoomLevel LoadSavedPreference()
+    {
+        try
+        {
+            if (File.Exists(ZoomFilePath))
+            {
+                string raw = File.ReadAllText(ZoomFilePath).Trim();
+                if (TryParse(raw, out ZoomLevel parsed))
+                {
+                    return parsed;
+                }
+            }
+        }
+        catch { }
+
+        return ZoomLevel.P100;
+    }
+
+    public static void SavePreference(ZoomLevel level)
+    {
+        try
+        {
+            Directory.CreateDirectory(SettingsDirPath);
+            string text = level == ZoomLevel.Auto ? "auto" : ((uint)level).ToString(CultureInfo.InvariantCulture);
+            File.WriteAllText(ZoomFilePath, text);
+        }
+        catch { }
+    }
+
+    public static bool TryParse(string? raw, out ZoomLevel level)
+    {
+        level = ZoomLevel.P100;
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+
+        string normalized = raw.Trim().TrimEnd('%').ToLowerInvariant();
+        if (normalized is "auto" or "0")
+        {
+            level = ZoomLevel.Auto;
+            return true;
+        }
+
+        if (uint.TryParse(normalized, NumberStyles.Integer, CultureInfo.InvariantCulture, out uint pct))
+        {
+            switch (pct)
+            {
+                case 25:  level = ZoomLevel.P25;  return true;
+                case 50:  level = ZoomLevel.P50;  return true;
+                case 75:  level = ZoomLevel.P75;  return true;
+                case 100: level = ZoomLevel.P100; return true;
+                case 125: level = ZoomLevel.P125; return true;
+                case 150: level = ZoomLevel.P150; return true;
+                case 200: level = ZoomLevel.P200; return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static string FormatDisplay(ZoomLevel level) => level switch
+    {
+        ZoomLevel.Auto => "Auto (Host DPI)",
+        ZoomLevel.P25  => "25%",
+        ZoomLevel.P50  => "50%",
+        ZoomLevel.P75  => "75%",
+        ZoomLevel.P100 => "100% (1:1 Pixel-Exact)",
+        ZoomLevel.P125 => "125%",
+        ZoomLevel.P150 => "150%",
+        ZoomLevel.P200 => "200%",
+        _ => $"{(uint)level}%"
+    };
 }
 
 [ComImport]
@@ -309,6 +396,8 @@ public sealed class RdpConsoleControl : AxHost
     public bool HasActiveVideo { get; private set; } = true;
     public bool IsMouseModeRelative { get; private set; }
     public ZoomLevel CurrentZoomLevel { get; private set; } = ZoomLevel.P100;
+    public bool? IsFrameBufferRedirectionActive { get; private set; }
+    public int LastZoomPutHResult { get; private set; }
     public uint LastNetworkQualityLevel { get; private set; }
     public int LastBandwidthKbps { get; private set; }
     public int LastRoundTripTimeMs { get; private set; }
@@ -316,8 +405,8 @@ public sealed class RdpConsoleControl : AxHost
     public Size DesktopResolution => new(RemoteDesktopWidth, RemoteDesktopHeight);
 
     public Size ScaledDesktopResolution => new(
-        (int)((double)(RemoteDesktopWidth * (int)CurrentZoomLevel) / 100.0),
-        (int)((double)(RemoteDesktopHeight * (int)CurrentZoomLevel) / 100.0)
+        (int)Math.Round(RemoteDesktopWidth * ((int)CurrentZoomLevel / 100.0)),
+        (int)Math.Round(RemoteDesktopHeight * ((int)CurrentZoomLevel / 100.0))
     );
 
     public RdpConsoleControl()
@@ -419,18 +508,21 @@ public sealed class RdpConsoleControl : AxHost
     /// <summary>
     /// Applies IMsRdpExtendedSettings["ZoomLevel"] (VT_UI4) and resizes the ActiveX control
     /// identically to VMConnect RdpViewerControl.SetZoomLevel, without SmartSizing blur.
+    /// Passing force: true guarantees ZoomLevel is explicitly written to mstscax.dll even when
+    /// CurrentZoomLevel already matches target (e.g. right after connect or fullscreen transitions).
     /// </summary>
-    public void SetZoomLevel(ZoomLevel level, Size viewportSize, bool isFullScreen = false)
+    public void SetZoomLevel(ZoomLevel level, Size viewportSize, bool isFullScreen = false, bool force = false)
     {
         ZoomLevel target = level == ZoomLevel.Auto ? ComputeAutoZoomLevel() : level;
 
         _ocx ??= GetOcx();
-        if (IsConnected && CurrentZoomLevel != target && _ocx is IMsRdpExtendedSettings extSettings)
+        if (IsConnected && (force || CurrentZoomLevel != target) && _ocx is IMsRdpExtendedSettings extSettings)
         {
             try
             {
                 object zoomVal = (uint)target;
                 int hr = extSettings.put_Property("ZoomLevel", ref zoomVal);
+                LastZoomPutHResult = hr;
                 if (hr >= 0)
                 {
                     CurrentZoomLevel = target;
@@ -447,6 +539,29 @@ public sealed class RdpConsoleControl : AxHost
         }
 
         ApplyViewportLayout(viewportSize, isFullScreen);
+    }
+
+    /// <summary>
+    /// Triggers mstscax.dll's built-in Session Diagnostics dialog (live FPS / graphics mode / RTT).
+    /// </summary>
+    public bool TryShowSessionDiagnostics()
+    {
+        _ocx ??= GetOcx();
+        if (!IsConnected || _ocx is not IMsRdpExtendedSettings extSettings)
+        {
+            return false;
+        }
+
+        try
+        {
+            object show = true;
+            return extSettings.put_Property("ShowSessionDiagnostics", ref show) >= 0;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[RdpConsoleControl] ShowSessionDiagnostics ignored: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>
@@ -517,6 +632,7 @@ public sealed class RdpConsoleControl : AxHost
         IsConnected = false;
         HasActiveVideo = true;
         IsMouseModeRelative = false;
+        IsFrameBufferRedirectionActive = null;
         RemoteDesktopWidth = BiosResolution.Width;
         RemoteDesktopHeight = BiosResolution.Height;
         Dock = DockStyle.None;
@@ -612,6 +728,7 @@ public sealed class RdpConsoleControl : AxHost
             {
                 TrySetExtendedProperty(extSettings, "EnableFrameBufferRedirection", true);
             }
+            RefreshFrameBufferRedirectionStatus(extSettings);
 
             // VMStream isolation: touch is handled over VM-isolated AF_HYPERV HID bridge when enabled
             TrySetExtendedProperty(extSettings, "DisableTouchRemoting", disableTouchRemoting);
@@ -893,11 +1010,29 @@ public sealed class RdpConsoleControl : AxHost
         }
     }
 
+    private void RefreshFrameBufferRedirectionStatus(IMsRdpExtendedSettings? extSettings = null)
+    {
+        try
+        {
+            extSettings ??= (_ocx ?? GetOcx()) as IMsRdpExtendedSettings;
+            if (extSettings != null &&
+                extSettings.get_Property("EnableFrameBufferRedirection", out object? val) >= 0 &&
+                val is bool enabled)
+            {
+                IsFrameBufferRedirectionActive = enabled;
+            }
+        }
+        catch
+        {
+        }
+    }
+
     internal void RaiseOnConnecting() => Connecting?.Invoke();
 
     internal void RaiseOnConnected()
     {
         IsConnected = true;
+        RefreshFrameBufferRedirectionStatus();
         Connected?.Invoke();
     }
 

@@ -3,7 +3,7 @@
 // Replicates Microsoft VMConnect (RdpClient / RdpViewerControl) ActiveX setup
 // strictly in Hyper-V Basic Console Session mode (localhost:2179, clean PCB
 // GUID without braces or ;EnhancedMode=1, ZoomLevel + pixel-exact sizing,
-// NetworkConnectionType = 6 LAN without overrides) while keeping VMStream's
+// default NetworkConnectionType unset) while keeping VMStream's
 // AF_HYPERV touch/audio isolation and LowLevelKeyboardHook compatibility.
 // ============================================================================
 using System;
@@ -122,7 +122,7 @@ public interface IMsTscAxEventsSink
 /// <summary>
 /// Direct COM interface for IMsRdpExtendedSettings ({302D8188-0052-4807-806A-362B628F9AC5})
 /// used for "DisableCredentialsDelegation", "EnableFrameBufferRedirection",
-/// "DisableTouchRemoting", and runtime "ZoomLevel" (VT_UI4).
+/// "AllowAxToContainerEvents", "DisableTouchRemoting", and runtime "ZoomLevel" (VT_UI4).
 /// </summary>
 [ComImport]
 [Guid("302D8188-0052-4807-806A-362B628F9AC5")]
@@ -275,7 +275,6 @@ public sealed class RdpConsoleControl : AxHost
     private const int WM_SYSCHAR = 0x0106;
     private const int VK_SPACE = 32;
 
-    private const uint CONNECTION_TYPE_LAN = 6U;
     private const int VMCONNECT_MIN_INPUT_SEND_INTERVAL = 20;
 
     public static readonly Size BiosResolution = new(640, 400);
@@ -552,8 +551,9 @@ public sealed class RdpConsoleControl : AxHost
         // --------------------------------------------------------------------
         // Phase 1: RdpViewerControl.CreateRdpClient parity
         // Intentionally leaves ColorDepth, Compress, BitmapPeristence, SmartSizing,
-        // PerformanceFlags, BandwidthDetection, EnableHardwareMode, DesktopScaleFactor,
-        // and DeviceScaleFactor at their mstscax Basic Console defaults!
+        // PerformanceFlags, BandwidthDetection, NetworkConnectionType, EnableHardwareMode,
+        // DesktopScaleFactor, and DeviceScaleFactor at their mstscax Basic Console defaults!
+        // (VMConnect only sets NetworkConnectionType = 6 when EnhancedSessionTransportType == HvSocket.)
         // --------------------------------------------------------------------
         SetAdvProperty(advDisp, fallbackAdv, a => a.EnableAutoReconnect = false, "EnableAutoReconnect", false);
         SetAdvProperty(advDisp, fallbackAdv, a => a.ContainerHandledFullScreen = 1, "ContainerHandledFullScreen", 1);
@@ -564,9 +564,6 @@ public sealed class RdpConsoleControl : AxHost
             a => a.AuthenticationServiceClass = "Microsoft Virtual Console Service",
             "AuthenticationServiceClass",
             "Microsoft Virtual Console Service");
-
-        // Hint 10 Gbps+ HVSocket LAN link (CONNECTION_TYPE_LAN = 6U) without disabling BandwidthDetection
-        SetAdvProperty(advDisp, fallbackAdv, a => a.NetworkConnectionType = CONNECTION_TYPE_LAN, "NetworkConnectionType", CONNECTION_TYPE_LAN);
 
         // Parent security/CredSSP prompts cleanly & set ConnectionBarText ("{0} on {1}")
         if (_ocx is IMsRdpClientNonScriptable3 nonScriptable)
@@ -650,6 +647,13 @@ public sealed class RdpConsoleControl : AxHost
                 SetComProperty(fallbackSec, "KeyboardHookMode", 1);
                 SetComProperty(fallbackSec, "AudioRedirectionMode", 2);
             }
+        }
+
+        // VMConnect RdpViewerControl.CreateRdpClient parity: enable AX-to-container events
+        // (required on Windows 11 22H2+ where this defaults to false so focus-release events propagate)
+        if (_ocx is IMsRdpExtendedSettings extContainerEvents)
+        {
+            TrySetExtendedProperty(extContainerEvents, "AllowAxToContainerEvents", true);
         }
 
         // Keep VMStream distraction-free fullscreen bar hidden by default (still reachable via Ctrl+Alt+Home)
